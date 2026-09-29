@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@theme {
+  --color-canvas-bg: #0c0d0e;
+  --color-node-surface: #15171a;
+  --color-node-surface-hover: #1c1f24;
+  --color-node-border: #282c34;
+  --color-node-border-active: #6366f1;
+  --color-canvas-text: #f3f4f6;
+  --color-canvas-muted: #9ca3af;
+  --color-canvas-dot: rgba(255, 255, 255, 0.08);
+
+  --spacing-touch-target: 44px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-canvas-bg);
+  color: var(--color-canvas-text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
