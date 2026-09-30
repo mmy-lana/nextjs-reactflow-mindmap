@@ -61,7 +61,16 @@ export function ActionSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 animate-fade-in sm:items-end sm:justify-end"
+      className={cn(
+        'fixed inset-0 z-50 flex items-end justify-center bg-black/50 animate-fade-in',
+        'sm:items-end sm:justify-end',
+        // From `sm` up the sheet is a card next to the canvas, not a modal over
+        // it: dimming the map and swallowing its pointer events made the layout
+        // sliders unusable, because the effect of a slider can only be judged by
+        // looking at what it moves. The backdrop is gone from this width up and
+        // the sheet re-enables pointer events for itself below.
+        'sm:bg-transparent sm:pointer-events-none',
+      )}
       onClick={onBackdropClick}
     >
       <div
@@ -74,7 +83,7 @@ export function ActionSheet({
           "flex max-h-[70vh] w-full flex-col rounded-t-2xl border border-node-border bg-surface-raised",
           "shadow-2xl outline-none animate-sheet-in",
           // A card above the toolbar on anything larger than a phone.
-          "sm:mb-24 sm:mr-6 sm:max-h-[60vh] sm:w-96 sm:rounded-2xl sm:border",
+          "sm:pointer-events-auto sm:mb-24 sm:mr-6 sm:max-h-[60vh] sm:w-96 sm:rounded-2xl sm:border",
           className,
         )}
       >

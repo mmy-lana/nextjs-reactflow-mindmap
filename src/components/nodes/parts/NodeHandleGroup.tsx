@@ -72,28 +72,37 @@ export function NodeHandleGroup({
     );
   }
 
-  // The side a node grows towards carries the source the layout wires; the
-  // opposite side is where its own parent edge arrives. `CENTER` only occurs on
-  // the root, which returns before this point.
+  // Which face each id belongs to is fixed, and it is the mirror image of
+  // `resolveEdgeHandleIds` in the pure layout engine:
+  //
+  // - a node on the RIGHT receives its parent edge on its LEFT face and hands
+  //   its own children a RIGHT source;
+  // - a node on the LEFT receives it on its RIGHT face and hands out a LEFT
+  //   source.
+  //
+  // The parent always attaches to the side facing it, which is what keeps the
+  // generated bezier running away from the parent instead of looping back over
+  // the child's own box. `CENTER` only occurs on the root, which returns before
+  // this point.
   const onLeft = direction === 'LEFT';
-  const sourceId = onLeft ? NODE_HANDLE_IDS.LEFT_SOURCE : NODE_HANDLE_IDS.RIGHT_SOURCE;
-  const targetId = onLeft ? NODE_HANDLE_IDS.LEFT_TARGET : NODE_HANDLE_IDS.RIGHT_TARGET;
 
   return (
     <>
+      {/* The handle the parent's edge arrives on. */}
       {!isRoot && (
         <Handle
-          id={targetId}
+          id={onLeft ? NODE_HANDLE_IDS.RIGHT_TARGET : NODE_HANDLE_IDS.LEFT_TARGET}
           type="target"
-          position={onLeft ? Position.Left : Position.Right}
+          position={onLeft ? Position.Right : Position.Left}
           isConnectable={isConnectable}
           style={style}
           className={cn(handleClass, isConnectable && visibleHandleClass)}
           aria-label="Incoming branch"
         />
       )}
+      {/* The handle children hang off. */}
       <Handle
-        id={sourceId}
+        id={onLeft ? NODE_HANDLE_IDS.LEFT_SOURCE : NODE_HANDLE_IDS.RIGHT_SOURCE}
         type="source"
         position={onLeft ? Position.Left : Position.Right}
         isConnectable={isConnectable}
@@ -101,12 +110,14 @@ export function NodeHandleGroup({
         className={cn(handleClass, isConnectable && visibleHandleClass)}
         aria-label="Outgoing branch"
       />
-      {/* Invisible, but still a legal origin for a drag. */}
+      {/* The mirrored pair, invisible but still legal: a node keeps both
+          orientations available so a connection can be made in any direction
+          without this component knowing where the layout decided to route. */}
       {!isRoot && (
         <Handle
-          id={onLeft ? NODE_HANDLE_IDS.RIGHT_TARGET : NODE_HANDLE_IDS.LEFT_TARGET}
+          id={onLeft ? NODE_HANDLE_IDS.LEFT_TARGET : NODE_HANDLE_IDS.RIGHT_TARGET}
           type="target"
-          position={onLeft ? Position.Right : Position.Left}
+          position={onLeft ? Position.Left : Position.Right}
           isConnectable={isConnectable}
           className="!bg-transparent"
           aria-label="Incoming branch"

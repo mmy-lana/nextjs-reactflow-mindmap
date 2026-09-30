@@ -11,6 +11,7 @@
  */
 
 import {
+  DEFAULT_EDGE_DATA,
   DEFAULT_NODE_SIZE,
   isBranchSide,
   type CanvasEdge,
@@ -377,11 +378,35 @@ export function buildAcyclicChildIndex(
  * recomputing them keeps a map loaded from disk (or from an imported file, or
  * after a re-parent) consistent. Every other field, including the position, is
  * preserved.
+ *
+ * ## Single root invariant
+ *
+ * A mind map has exactly one root, and `containsSingleRootNode` is the guard
+ * that decides whether a payload may reach the store at all. Deriving depth
+ * from "every parentless node starts a breadth first walk" violates that
+ * invariant twice over: two disconnected components would each start at depth
+ * `0`, and a component whose stored depth happened to be `0` would be promoted
+ * to `root` type as well.
+ *
+ * So the walk is rooted at exactly one node, chosen by {@link findRootNode},
+ * and every other node is derived from that root:
+ *
+ * - reachable nodes get their true depth, from `1` for a direct child down;
+ * - unreachable nodes (a detached component, or a node trapped in a cycle) are
+ *   reported at depth `1` with no parent. They are never typed `root`, so the
+ *   map keeps a single root no matter how damaged the edge set is.
+ *
+ * {@link repairMindMapGraph} goes one step further and re-attaches those
+ * orphans with a real edge, which is the only way they can be laid out again.
  */
 export function reindexNodeMetadata(
   nodes: readonly CanvasNode[],
   edges: readonly CanvasEdge[],
 ): CanvasNode[] {
+  if (nodes.length === 0) {
+    return [];
+  }
+
   const lookup = buildNodeLookup(nodes);
   const parentByChild = new Map<string, string>();
   const childCountByParent = new Map<string, number>();
@@ -406,35 +431,32 @@ export function reindexNodeMetadata(
     }
   }
 
-  // Breadth first from every parentless node, so a node can only be reached by
-  // one path and no node is visited twice.
+  // One root, one walk. Anything the walk does not reach is an orphan.
+  const rootNode = findRootNode(nodes);
   const depthById = new Map<string, number>();
-  const queue: string[] = [];
-  for (const node of nodes) {
-    if (!parentByChild.has(node.id)) {
-      depthById.set(node.id, 0);
-      queue.push(node.id);
-    }
-  }
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const nodeId = queue[cursor];
-    const depth = (depthById.get(nodeId) ?? 0) + 1;
-    for (const childId of childIdsByParent.get(nodeId) ?? []) {
-      if (!depthById.has(childId)) {
-        depthById.set(childId, depth);
-        queue.push(childId);
+  if (rootNode) {
+    depthById.set(rootNode.id, 0);
+    const queue: string[] = [rootNode.id];
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const nodeId = queue[cursor];
+      const depth = (depthById.get(nodeId) ?? 0) + 1;
+      for (const childId of childIdsByParent.get(nodeId) ?? []) {
+        if (!depthById.has(childId)) {
+          depthById.set(childId, depth);
+          queue.push(childId);
+        }
       }
     }
   }
 
   return nodes.map((node) => {
-    const parentId = parentByChild.get(node.id) ?? null;
+    const isRoot = node.id === rootNode?.id;
+    const parentId = isRoot ? null : (parentByChild.get(node.id) ?? null);
     const childCount = childCountByParent.get(node.id) ?? 0;
-    // A node in a cycle is unreachable from a root; its stored depth is kept
-    // rather than reset, so the inconsistency stays visible instead of being
-    // silently turned into a second root.
-    const depth = depthById.get(node.id) ?? node.data.depth;
-    const type: CanvasNode['type'] = depth === 0 ? 'root' : childCount > 0 ? 'branch' : 'leaf';
+    // An orphan sits outside the tree: depth 1 and no parent, never depth 0 and
+    // never typed `root`, which is what keeps `containsSingleRootNode` true.
+    const depth = isRoot ? 0 : (depthById.get(node.id) ?? 1);
+    const type: CanvasNode['type'] = isRoot ? 'root' : childCount > 0 ? 'branch' : 'leaf';
 
     if (
       node.data.parentId === parentId &&
@@ -456,6 +478,107 @@ export function reindexNodeMetadata(
       },
     };
   });
+}
+
+/**
+ * Repairs a graph that a user, a hand edited file or a half finished import may
+ * have damaged, and returns a map with exactly one root.
+ *
+ * Three kinds of damage are handled:
+ *
+ * 1. **Dangling edges** (an endpoint that is not in the node list, or an edge
+ *    pointing at its own source) are dropped, because nothing can draw them.
+ * 2. **Cycles and second parents** are broken by walking from the root and
+ *    keeping only the edge that first claims each target. A node therefore ends
+ *    up with exactly one parent and no path back to its own ancestor.
+ * 3. **Detached components** are re-attached to the root with a synthesized
+ *    edge, ordered after everything already hanging there. Without this the
+ *    nodes would keep stale coordinates forever, because the layout engine only
+ *    walks the tree reachable from the root.
+ *
+ * Every surviving node ends up reachable from the single root, so
+ * `containsSingleRootNode(repaired.nodes)` holds afterwards.
+ */
+export function repairMindMapGraph(
+  nodes: readonly CanvasNode[],
+  edges: readonly CanvasEdge[],
+): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  if (nodes.length === 0) {
+    return { nodes: [], edges: [] };
+  }
+
+  const lookup = buildNodeLookup(nodes);
+  const rootNode = findRootNode(nodes);
+  if (!rootNode) {
+    return { nodes: reindexNodeMetadata(nodes, edges), edges: [] };
+  }
+
+  /* 1. Keep only the edges that can exist at all. */
+  const resolvable = edges.filter(
+    (edge) =>
+      lookup.has(edge.source) && lookup.has(edge.target) && edge.source !== edge.target,
+  );
+
+  /* 2. Keep only the edges that build a tree: a reachable source, and a target
+   *    that is not the root and has no parent yet.
+   *
+   *    Claiming the target is what enforces the single parent rule, and it also
+   *    subsumes the cycle check. Every node on the walk to the source is
+   *    already claimed, by definition of having been reached, so an edge back up
+   *    to an ancestor is refused here without a separate path scan. A graph
+   *    that arrived with two parents for one node keeps the first, which is the
+   *    one in document order and therefore the one the writer meant. */
+  const claimed = new Set<string>([rootNode.id]);
+  const acyclic: CanvasEdge[] = [];
+
+  const walk = (nodeId: string): void => {
+    for (const edge of resolvable) {
+      if (edge.source !== nodeId) {
+        continue;
+      }
+      if (claimed.has(edge.target)) {
+        continue;
+      }
+      acyclic.push(edge);
+      claimed.add(edge.target);
+      walk(edge.target);
+    }
+  };
+  walk(rootNode.id);
+
+  /* 3. Re-attach whatever the walk could not reach to the root. */
+  const reachable = claimed;
+  const orphans = nodes.filter((node) => !reachable.has(node.id));
+  const rootChildCount = acyclic.filter((edge) => edge.source === rootNode.id).length;
+  const reattached = orphans.map((node, index) => ({
+    ...node,
+    type: 'branch' as const,
+    data: {
+      ...node.data,
+      parentId: rootNode.id,
+      depth: 1,
+      order: rootChildCount + index,
+      updatedAt: Date.now(),
+    },
+  }));
+
+  const synthesized: CanvasEdge[] = orphans.map((node) => ({
+    id: `repair-${rootNode.id}-${node.id}`,
+    source: rootNode.id,
+    target: node.id,
+    type: 'organic',
+    sourceHandle: null,
+    targetHandle: null,
+    data: { ...DEFAULT_EDGE_DATA, depth: 1 },
+  }));
+
+  return {
+    nodes: reindexNodeMetadata([...nodes.filter((node) => reachable.has(node.id)), ...reattached], [
+      ...acyclic,
+      ...synthesized,
+    ]),
+    edges: [...acyclic, ...synthesized],
+  };
 }
 
 /**

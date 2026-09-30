@@ -216,9 +216,16 @@ textarea,
   max-height: 18px;
 }
 
+/*
+ * React Flow ships a white minimap surface of its own, applied inline. On the
+ * dark canvas that is the brightest thing on screen, so it is overridden here
+ * with the same token the node surfaces use; the `!important` is needed because
+ * the library sets the colour through an inline style.
+ */
 .react-flow__minimap {
-  border-radius: 0.75rem;
+  background-color: var(--color-node-surface) !important;
   border: 1px solid var(--color-node-border);
+  border-radius: 0.75rem;
   box-shadow: none;
 }
 

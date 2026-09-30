@@ -103,18 +103,24 @@ export function FloatingToolbar({
   const activeDrawer = useMindMapStore((state) => state.activeDrawer);
   const setActiveDrawer = useMindMapStore((state) => state.setActiveDrawer);
   const { canUndo, undoLabel, canRedo, redoLabel, undo, redo } = useCanvasHistory();
-  const { selectedNode, addChild, addSibling } = useNodeOperations();
+  const { selectedNode, addChild } = useNodeOperations();
 
   const handleAdd = useCallback(() => {
     if (selectedNode) {
       addChild(selectedNode.id);
       return;
     }
-    // With nothing selected the useful action is a second top level branch.
+    /**
+     * With nothing selected the useful action is a branch of the root concept.
+     *
+     * `addSibling(rootId)` was the obvious choice and the wrong one: it asks the
+     * store for the root's parent, which does not exist, so the store refused
+     * the call and the button silently did nothing.
+     */
     if (rootNodeId) {
-      addSibling(rootNodeId);
+      addChild(rootNodeId);
     }
-  }, [selectedNode, addChild, rootNodeId, addSibling]);
+  }, [selectedNode, addChild, rootNodeId]);
 
   const closeOverflow = useCallback(() => {
     setIsOverflowOpen(false);

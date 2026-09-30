@@ -127,23 +127,34 @@ function NodeShellComponent({ variant, children, isCompact = false, ...props }: 
         ) : (
           <>
             {/* A collapsed branch is a fold: the chevron is the only way back in. */}
+            {/*
+              A 44px pointer target without a 44px layout footprint.
+
+              The chevron is drawn 24px so a branch row stays compact, and the
+              matching negative margin cancels the extra size the touch minimum
+              adds. The box the pointer sees is the full 44x44, which is what a
+              fingertip needs, while the node keeps the height it had.
+            */}
             {childCount > 0 && (
               <button
                 type="button"
                 aria-label={node.isCollapsed ? 'Expand branch' : 'Collapse branch'}
-                className="nodrag -mt-0.5 -ml-1 flex size-6 shrink-0 items-center justify-center rounded-md text-canvas-muted transition-colors hover:bg-node-surface-hover hover:text-canvas-text"
+                data-testid="collapse-toggle"
+                className="nodrag -m-2.5 flex size-6 min-h-touch-target min-w-touch-target shrink-0 items-center justify-center"
                 onClick={(event) => {
                   event.stopPropagation();
                   toggleSubtreeCollapse(id);
                 }}
               >
-                <ChevronRight
-                  aria-hidden="true"
-                  className={cn(
-                    'size-4 transition-transform duration-200',
-                    !node.isCollapsed && 'rotate-90',
-                  )}
-                />
+                <span className="flex size-6 items-center justify-center rounded-md text-canvas-muted transition-colors hover:bg-node-surface-hover hover:text-canvas-text">
+                  <ChevronRight
+                    aria-hidden="true"
+                    className={cn(
+                      'size-4 transition-transform duration-200',
+                      !node.isCollapsed && 'rotate-90',
+                    )}
+                  />
+                </span>
               </button>
             )}
             <div className="min-w-0 flex-1">
@@ -187,7 +198,20 @@ function NodeShellComponent({ variant, children, isCompact = false, ...props }: 
         aria-haspopup="menu"
         aria-expanded={isMenuOpen}
         className={cn(
+          /**
+           * A 44px pointer target around a 28px bubble.
+           *
+           * The bubble is deliberately small so it does not cover the node
+           * label, and making the element itself 44px would do that anyway.
+           * The invisible `after` box is the hit area instead: a pseudo element
+           * still belongs to its button for hit testing, and it is drawn
+           * underneath the bubble by the negative inset, so what the user sees
+           * is unchanged.
+           */
           'nodrag absolute -right-2.5 -bottom-2.5 flex size-7 items-center justify-center rounded-full',
+          // `after:` generates the pseudo-element and sets its `content`, so the
+          // box exists purely for hit testing and paints nothing.
+          'after:absolute after:-inset-2 after:rounded-full',
           'border border-node-border bg-surface-overlay text-canvas-muted shadow-lg shadow-black/40',
           'transition-[opacity,transform] duration-150 hover:scale-105 hover:text-canvas-text',
           selected

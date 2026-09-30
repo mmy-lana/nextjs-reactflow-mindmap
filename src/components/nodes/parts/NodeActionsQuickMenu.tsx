@@ -11,7 +11,7 @@ import {
   useFloating,
   useInteractions,
 } from "@floating-ui/react";
-import { ChevronRight, CornerDownRight, GitBranchPlus, ListPlus, Trash2 } from "lucide-react";
+import { ChevronRight, CornerDownRight, GitBranchPlus, ListPlus, Pencil, Trash2 } from "lucide-react";
 import { useMindMapStore } from "@/store/useMindMapStore";
 import { FOCUSABLE_ITEM_SELECTOR } from "@/lib/focusable";
 import { NODE_STATUS_META, NODE_STATUS_ORDER, type NodeStatus } from "@/types/mindmap";
@@ -42,7 +42,7 @@ export interface NodeActionsQuickMenuProps {
   onClose: () => void;
 }
 
-type MenuActionId = 'addChild' | 'addSibling' | 'toggleCollapse' | 'delete';
+type MenuActionId = 'rename' | 'addChild' | 'addSibling' | 'toggleCollapse' | 'delete';
 
 interface MenuAction {
   id: MenuActionId;
@@ -68,6 +68,7 @@ export function NodeActionsQuickMenu({
   const deleteSubtree = useMindMapStore((state) => state.deleteSubtree);
   const toggleSubtreeCollapse = useMindMapStore((state) => state.toggleSubtreeCollapse);
   const updateNodeStatus = useMindMapStore((state) => state.updateNodeStatus);
+  const setEditingNodeId = useMindMapStore((state) => state.setEditingNodeId);
   const isRoot = useMindMapStore(
     (state) => state.nodes.find((node) => node.id === nodeId)?.data.depth === 0,
   );
@@ -101,6 +102,10 @@ export function NodeActionsQuickMenu({
 
   const actions = useMemo<MenuAction[]>(() => {
     const list: MenuAction[] = [
+      // Renaming is the one action the menu used to be missing: double tapping
+      // the label is not discoverable, and on a phone it competes with the tap
+      // that selects the node.
+      { id: 'rename', label: 'Rename node', icon: Pencil },
       { id: 'addChild', label: 'Add child', icon: CornerDownRight },
       { id: 'addSibling', label: 'Add sibling', icon: GitBranchPlus, isDisabled: isRoot },
     ];
@@ -121,6 +126,12 @@ export function NodeActionsQuickMenu({
   const runAction = useCallback(
     (actionId: MenuActionId) => {
       switch (actionId) {
+        case 'rename':
+          // The menu closes first: the field mounts inside the node, which sits
+          // under a transformed viewport, and an open popover would steal focus
+          // back on its own unmount.
+          setEditingNodeId(nodeId);
+          break;
         case 'addChild':
           addNode(nodeId);
           break;
@@ -138,7 +149,16 @@ export function NodeActionsQuickMenu({
       }
       onClose();
     },
-    [addNode, addSibling, deleteSubtree, nodeId, isRoot, onClose, toggleSubtreeCollapse],
+    [
+      addNode,
+      addSibling,
+      deleteSubtree,
+      nodeId,
+      isRoot,
+      onClose,
+      setEditingNodeId,
+      toggleSubtreeCollapse,
+    ],
   );
 
   // Focus lands on the first action so a keyboard user is inside the menu

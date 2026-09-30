@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { MiniMap, Panel } from "@xyflow/react";
 import { useVisualViewport } from "@/hooks/useVisualViewport";
-import { BRANCH_COLOR_PALETTE } from "@/types/mindmap";
 import { cn } from "@/lib/cn";
 
 /**
@@ -68,13 +67,14 @@ export function MinimapOverlay(): React.JSX.Element | null {
         <MiniMap
           pannable
           zoomable
+          // The library paints this surface white by default, which is the
+          // brightest pixel on a dark canvas. Both the stylesheet and this
+          // inline value set it, because the inline one wins over the class.
+          style={{ backgroundColor: 'var(--color-node-surface)' }}
           // Thick enough to aim at a branch without zooming the minimap itself.
           nodeStrokeWidth={2}
           nodeBorderRadius={4}
-          nodeColor={(node) => {
-            const depth = typeof node.data?.depth === 'number' ? node.data.depth : 0;
-            return BRANCH_COLOR_PALETTE[Math.min(depth, BRANCH_COLOR_PALETTE.length - 1)];
-          }}
+          nodeColor="#6366f1"
           maskColor="rgba(12, 13, 14, 0.72)"
           className="!rounded-xl"
         />

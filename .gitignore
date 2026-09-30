@@ -27,3 +27,10 @@ pnpm-debug.log*
 next-env.d.ts
 
 repomix-output.xml
+
+# playwright
+/test-results/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

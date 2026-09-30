@@ -51,7 +51,9 @@ import {
   collectDescendants,
   collectHiddenNodeIds,
   findRootNode,
+  normalizeSiblingOrders,
   reindexNodeMetadata,
+  repairMindMapGraph,
   sortSiblingsByOrder,
 } from "@/lib/treeTransforms";
 import { calculateMindMapLayout } from "@/lib/layoutEngine";
@@ -69,6 +71,18 @@ import {
 let saveQueue: Promise<void> = Promise.resolve();
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingPayload: MindMapExportPayload | null = null;
+
+/**
+ * Monotonic token identifying the load that is currently allowed to write.
+ *
+ * `loadDocument` is asynchronous and the route can change under it: a user who
+ * clicks back to the list and opens another map while the first read is still
+ * in flight would otherwise have the slower read win and hydrate the store with
+ * the wrong document. Every load takes a token before its first `await` and
+ * checks it again before touching state; `clearDocument` invalidates whatever
+ * is in flight by bumping the counter itself.
+ */
+let activeLoadToken = 0;
 
 /** Drops a scheduled write, if any. */
 function cancelPendingSave(): void {
@@ -93,6 +107,17 @@ function executeSerializedWrite(payload: MindMapExportPayload): Promise<void> {
   return saveQueue;
 }
 
+/**
+ * Writes after a quiet period, and reports what the write did.
+ *
+ * The status is moved here rather than only in `flushSave`, because the debounce
+ * is how almost every edit actually reaches the database. Without it the badge
+ * says "Unsaved changes" forever, even though the document was written seconds
+ * ago: the single worst thing a save indicator can do.
+ *
+ * A `saved` is not stamped if a newer edit has already marked the document
+ * dirty, so a slow write cannot report success over work that is still pending.
+ */
 function scheduleDebouncedSave(payload: MindMapExportPayload, delayMs: number): void {
   cancelPendingSave();
   pendingPayload = payload;
@@ -100,9 +125,22 @@ function scheduleDebouncedSave(payload: MindMapExportPayload, delayMs: number): 
     debounceTimer = null;
     const next = pendingPayload;
     pendingPayload = null;
-    if (next) {
-      void executeSerializedWrite(next).catch(() => undefined);
+    if (!next) {
+      return;
     }
+    useMindMapStore.setState({ saveStatus: 'saving' });
+    void executeSerializedWrite(next)
+      .then(() => {
+        if (useMindMapStore.getState().saveStatus !== 'dirty') {
+          useMindMapStore.setState({ saveStatus: 'saved' });
+        }
+      })
+      .catch((error: unknown) => {
+        useMindMapStore.setState({
+          saveStatus: 'error',
+          loadError: describeRepositoryError(error),
+        });
+      });
   }, delayMs);
 }
 
@@ -125,11 +163,20 @@ function flushImmediateSave(payload: MindMapExportPayload): Promise<void> {
  * the process is frozen, so a still-pending debounce window is flushed rather
  * than dropped. The write is fire-and-forget: there is no reliable moment left
  * to await it.
+ *
+ * Installation is idempotent. This module is evaluated once per page load, but a
+ * hot reload, a second `import()` of the same chunk through a different specifier
+ * or a test that resets modules would each add another pair of listeners, and
+ * every extra pair fires the same flush twice.
  */
+let isUnloadFlushInstalled = false;
+
 function installUnloadFlush(): void {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || isUnloadFlushInstalled) {
     return;
   }
+  isUnloadFlushInstalled = true;
+
   const handler = (): void => {
     const next = pendingPayload;
     if (debounceTimer === null || !next) {
@@ -272,6 +319,88 @@ export function describeRepositoryError(error: unknown): string {
   return "An unexpected error occurred.";
 }
 
+/**
+ * Renumbers the sibling groups of the given parents so their orders run 0, 1, 2.
+ *
+ * A group is defined by `data.parentId`, which the reindex pass keeps in step
+ * with the edge list, so no edge lookup is needed here. Nodes that do not change
+ * are returned by reference, so a delete that touched one group leaves every
+ * other node's React Flow identity alone.
+ */
+function renumberSiblingGroups(
+  nodes: CanvasNode[],
+  parentIds: ReadonlySet<string>,
+): CanvasNode[] {
+  if (parentIds.size === 0) {
+    return nodes;
+  }
+
+  const groups = new Map<string, CanvasNode[]>();
+  for (const node of nodes) {
+    const parentId = node.data.parentId;
+    if (!parentId || !parentIds.has(parentId)) {
+      continue;
+    }
+    const group = groups.get(parentId);
+    if (group) {
+      group.push(node);
+    } else {
+      groups.set(parentId, [node]);
+    }
+  }
+  if (groups.size === 0) {
+    return nodes;
+  }
+
+  const replacements = new Map<string, CanvasNode>();
+  for (const group of groups.values()) {
+    const sorted = sortSiblingsByOrder(group);
+    // `normalizeSiblingOrders` sorts and stamps `0..n-1` in one pass, so its
+    // result lines up index for index with `sorted`.
+    const normalized = normalizeSiblingOrders(sorted);
+    sorted.forEach((original, index) => {
+      if (original.data.order !== index) {
+        replacements.set(original.id, normalized[index]);
+      }
+    });
+  }
+
+  if (replacements.size === 0) {
+    return nodes;
+  }
+  return nodes.map((node) => replacements.get(node.id) ?? node);
+}
+
+/**
+ * Gives a freshly created node the place the layout engine would have given it.
+ *
+ * A node is created at the origin, so without this the first child a user adds
+ * lands exactly on top of its parent: the two boxes are indistinguishable and
+ * the new node looks like nothing happened. Committing the whole layout instead
+ * would be worse, because a node the user dragged somewhere deliberately would
+ * snap back on every add. So the layout is computed for its result and only the
+ * one new position is kept; everything the user has placed stays put.
+ *
+ * `edges` is the list *including* the new branch edge, because the engine
+ * derives the tree from edges rather than from `data.parentId`.
+ */
+function placeNewNode(
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+  newNodeId: string,
+  options: LayoutOptions,
+): CanvasNode[] {
+  const laidOut = calculateMindMapLayout(nodes, edges, options).nodes.find(
+    (node) => node.id === newNodeId,
+  );
+  if (!laidOut) {
+    return nodes;
+  }
+  return nodes.map((node) =>
+    node.id === newNodeId ? { ...node, position: laidOut.position } : node,
+  );
+}
+
 /** Flags nodes hidden by the current collapse state, and their edges. */
 function withCollapsedVisibility(
   nodes: CanvasNode[],
@@ -394,16 +523,25 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
     /* ------------------------------------------------------------- loading */
 
     loadDocument: async (documentId) => {
+      // Taken before the first await, so a slower earlier load cannot overwrite
+      // this one when both resolve.
+      const currentToken = (activeLoadToken += 1);
       set({ isHydrating: true, loadError: null });
 
       try {
         const record = await getDocument(documentId);
+        if (currentToken !== activeLoadToken) {
+          return;
+        }
 
         if (!record) {
           // A fresh route id becomes the document id, so reloading the same URL
           // opens that map instead of creating a second one.
           const createdId = await createDocument(UNNAMED_DOCUMENT_TITLE, { id: documentId });
           const created = await getDocument(createdId);
+          if (currentToken !== activeLoadToken) {
+            return;
+          }
           if (!created) {
             throw new DocumentRepositoryError(
               'write_failed',
@@ -416,13 +554,23 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
 
         hydrate(set, get, record.data.meta, record.data.nodes, record.data.edges);
       } catch (error) {
+        // A superseded load must stay silent: reporting its failure would show
+        // an error for a document the user already navigated away from.
+        if (currentToken !== activeLoadToken) {
+          return;
+        }
         set({ loadError: describeRepositoryError(error) });
       } finally {
-        set({ isHydrating: false });
+        if (currentToken === activeLoadToken) {
+          set({ isHydrating: false });
+        }
       }
     },
 
     clearDocument: () => {
+      // Invalidates every read that is still in flight, so an unmounting editor
+      // cannot hydrate a store the next editor has already emptied.
+      activeLoadToken += 1;
       cancelPendingSave();
       set({ ...INITIAL_STATE, isHydrating: false });
     },
@@ -453,14 +601,50 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         (change) => change.type === 'position' && change.dragging === false,
       );
 
-      commit(applyNodeChanges<CanvasNode>(otherChanges, nodes), edges, false);
+      /**
+       * A change that leaves the document exactly as it was is not an edit.
+       *
+       * `dimensions` arrives from every measurement React Flow takes, and
+       * `select` from every click, so treating either as a mutation would mark a
+       * freshly opened map as dirty and then spend a debounce window writing a
+       * payload identical to the one already stored. The state is still
+       * committed, because React Flow needs those two change types to reflect
+       * the measurements and the selection it just reported.
+       */
+      const isVisualOnly = otherChanges.every(
+        (change) => change.type === 'dimensions' || change.type === 'select',
+      );
+
+      /**
+       * The frames of a drag in progress are not a document state either.
+       *
+       * A pointer move emits a position change per animation frame, and every
+       * one of them would be a write. Only the frame that reports the drag as
+       * finished is a change worth storing, which is the one that also produced
+       * the undo entry.
+       */
+      const isInFlightDragOnly =
+        otherChanges.length > 0 &&
+        otherChanges.every((change) => change.type === 'position' && change.dragging === true);
+
+      const mutatesDocument = !isVisualOnly && !isInFlightDragOnly;
+
+      // A change that cannot alter the shape of the tree is committed without
+      // re-deriving anything: re-indexing would churn every node object for a
+      // measurement or a selection, and React Flow re-renders on identity.
+      commit(applyNodeChanges<CanvasNode>(otherChanges, nodes), edges, mutatesDocument);
 
       if (dragCommitted) {
         // A finished drag is a meaningful step; the intermediate position
         // changes deliberately are not.
         get().pushHistorySnapshot('Move Node');
       }
-      get().scheduleSave();
+
+      // Visual changes and in-flight drag frames never reach the database and
+      // never raise the dirty badge.
+      if (mutatesDocument) {
+        get().scheduleSave();
+      }
     },
 
     onEdgesChange: (changes) => {
@@ -620,12 +804,16 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
           : node,
       );
 
+      const branchEdge = createBranchEdge({
+        source: parentId,
+        target: child.id,
+        depth: child.data.depth,
+      });
+      const nextEdges = [...edges, branchEdge];
+
       commit(
-        [...withParentExpanded, child],
-        [
-          ...edges,
-          createBranchEdge({ source: parentId, target: child.id, depth: child.data.depth }),
-        ],
+        placeNewNode([...withParentExpanded, child], nextEdges, child.id, get().layoutOptions),
+        nextEdges,
         true,
       );
       set({ selectedNodeId: child.id });
@@ -651,12 +839,16 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         direction: node.data.direction === 'LEFT' ? 'RIGHT' : 'LEFT',
       });
 
+      const branchEdge = createBranchEdge({
+        source: parent.id,
+        target: sibling.id,
+        depth: sibling.data.depth,
+      });
+      const nextEdges = [...edges, branchEdge];
+
       commit(
-        [...nodes, sibling],
-        [
-          ...edges,
-          createBranchEdge({ source: parent.id, target: sibling.id, depth: sibling.data.depth }),
-        ],
+        placeNewNode([...nodes, sibling], nextEdges, sibling.id, get().layoutOptions),
+        nextEdges,
         true,
       );
       set({ selectedNodeId: sibling.id });
@@ -664,7 +856,7 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
     },
 
     updateNodeLabel: (id, label) => {
-      const { nodes } = get();
+      const { nodes, meta } = get();
       const trimmed = label.trim();
       const node = nodes.find((candidate) => candidate.id === id);
       if (!node || trimmed.length === 0 || trimmed === node.data.label) {
@@ -672,6 +864,28 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         // previous text is kept instead.
         return;
       }
+
+      /**
+       * The root concept *is* the document name, so the two cannot drift.
+       *
+       * The title follows the root label only while it is still the default or
+       * still the label the root had, because those are the two cases where the
+       * user never named the document separately. A title typed into the
+       * inspector always wins, and renaming any other node never touches it.
+       *
+       * This runs *before* the node patch because the patch is what schedules
+       * the write, and a write assembled a moment earlier would carry the old
+       * title: the badge would say saved and a reload would bring the old name
+       * back.
+       */
+      if (meta && (node.data.depth === 0 || node.type === 'root')) {
+        const followsRoot =
+          meta.title.trim() === UNNAMED_DOCUMENT_TITLE || meta.title.trim() === node.data.label;
+        if (followsRoot) {
+          set({ meta: { ...meta, title: trimmed } });
+        }
+      }
+
       patchNodeData(id, (data) => ({ ...data, label: trimmed, updatedAt: Date.now() }), 'Rename Node');
     },
 
@@ -751,11 +965,28 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       }
 
       const doomed = new Set<string>([nodeId, ...collectDescendants(nodeId, edges)]);
-      commit(
-        nodes.filter((candidate) => !doomed.has(candidate.id)),
-        edges.filter((edge) => !doomed.has(edge.source) && !doomed.has(edge.target)),
-        true,
+      const survivors = nodes.filter((candidate) => !doomed.has(candidate.id));
+      const survivingEdges = edges.filter(
+        (edge) => !doomed.has(edge.source) && !doomed.has(edge.target),
       );
+
+      /**
+       * Every sibling group the deletion touched is renumbered.
+       *
+       * `order` decides the vertical stacking of a subtree, so a gap left by a
+       * removed node would shift every later sibling of that parent. Only the
+       * parents of surviving nodes can be affected, which is exactly the set
+       * reachable from those nodes' own `parentId`.
+       */
+      const affectedParents = new Set<string>();
+      for (const survivor of survivors) {
+        if (survivor.data.parentId && !doomed.has(survivor.data.parentId)) {
+          affectedParents.add(survivor.data.parentId);
+        }
+      }
+      const renumbered = renumberSiblingGroups(survivors, affectedParents);
+
+      commit(renumbered, survivingEdges, true);
       set({ selectedNodeId: null });
       persist('Delete Node');
     },
@@ -851,12 +1082,23 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       if (!meta) {
         return;
       }
+      // A viewport that did not move is not a change, and writing the same
+      // numbers back would raise the dirty badge for a document nobody edited.
+      const current = meta.viewport;
+      if (
+        current &&
+        current.x === viewport.x &&
+        current.y === viewport.y &&
+        current.zoom === viewport.zoom
+      ) {
+        return;
+      }
       set({ meta: { ...meta, viewport } });
       get().scheduleSave();
     },
 
     renameDocument: (title) => {
-      const { meta } = get();
+      const { meta, nodes } = get();
       if (!meta) {
         return;
       }
@@ -865,6 +1107,22 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         return;
       }
       set({ meta: { ...meta, title: trimmed } });
+
+      /**
+       * The reverse of {@link MindMapActions.updateNodeLabel}: a document that
+       * is renamed in the inspector is renamed on its root concept too, so the
+       * canvas shows the same words as the header. The label write goes through
+       * the ordinary patch path so the undo step, the dirty flag and the save
+       * all stay in one place.
+       */
+      const root = findRootNode(nodes);
+      if (root && root.data.label.trim() !== trimmed) {
+        patchNodeData(
+          root.id,
+          (data) => ({ ...data, label: trimmed, updatedAt: Date.now() }),
+          'Rename Document',
+        );
+      }
       // A title is typed slowly and rarely; it is written without the debounce
       // so the dashboard never shows a stale name.
       void get().flushSave();
@@ -884,13 +1142,17 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       if (!meta) {
         return;
       }
+      // A payload can pass validation and still arrive with a detached
+      // component (two roots are rejected outright, a floating branch is not),
+      // so it is repaired before it is committed rather than laid out as it is.
+      const repaired = repairMindMapGraph(nextNodes, nextEdges);
       // Collapse state is not part of an imported payload, so every branch
       // starts expanded and any stale `hidden` flag is dropped.
-      const expanded = nextNodes.map((node) => {
+      const expanded = repaired.nodes.map((node) => {
         const { hidden: _hidden, ...rest } = node;
         return { ...rest, data: { ...rest.data, isCollapsed: false } } as CanvasNode;
       });
-      commit(expanded, nextEdges, true);
+      commit(expanded, repaired.edges, true);
       set({
         meta: {
           ...meta,
@@ -973,8 +1235,12 @@ function hydrate(
   nodes: CanvasNode[],
   edges: CanvasEdge[],
 ): void {
-  const repaired = reindexNodeMetadata(nodes, edges);
-  const visible = withCollapsedVisibility(repaired, edges);
+  // A record that reached IndexedDB can still be damaged: an import written by
+  // an older build, a storage edited by hand, or a write interrupted by a
+  // closed tab. Repairing here means the editor never sees a graph with two
+  // roots, a dangling edge or a detached component.
+  const repaired = repairMindMapGraph(nodes, edges);
+  const visible = withCollapsedVisibility(repaired.nodes, repaired.edges);
   set({
     documentId: meta.id,
     meta,

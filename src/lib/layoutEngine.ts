@@ -88,9 +88,23 @@ const MAX_RADIAL_DEPTH = 32;
 /**
  * Returns the handle pair an edge must use.
  *
- * Horizontal layouts wire branches to the left/right handles, radial layouts
- * use the top/bottom pair so the generated bezier curves stay readable when
- * children are placed around their parent.
+ * A branch edge leaves its parent on the face that points at the children and
+ * arrives on the child's inward facing side, so the curve always runs away from
+ * the parent:
+ *
+ * - a `RIGHT` branch leaves through the parent's `RIGHT_SOURCE` and arrives at
+ *   the child's `LEFT_TARGET`;
+ * - a `LEFT` branch leaves through the parent's `LEFT_SOURCE` and arrives at the
+ *   child's `RIGHT_TARGET`.
+ *
+ * Wiring both ends to the same side is what produced the mirrored S-curves that
+ * looped back across the target node's own box: the edge started on the face
+ * pointing at the child and ended on the face pointing back at the parent.
+ *
+ * Radial layouts have no left or right, so the pair is the top source and the
+ * bottom target. That is the angular alignment a radial wedge needs: the parent
+ * hands the edge upwards and the child receives it from below, which reads
+ * consistently for a subtree in any quadrant instead of flipping per branch.
  */
 export function resolveEdgeHandleIds(
   side: BranchSide,
@@ -103,8 +117,8 @@ export function resolveEdgeHandleIds(
     };
   }
   return side === 'LEFT'
-    ? { sourceHandle: NODE_HANDLE_IDS.LEFT_SOURCE, targetHandle: NODE_HANDLE_IDS.LEFT_TARGET }
-    : { sourceHandle: NODE_HANDLE_IDS.RIGHT_SOURCE, targetHandle: NODE_HANDLE_IDS.RIGHT_TARGET };
+    ? { sourceHandle: NODE_HANDLE_IDS.LEFT_SOURCE, targetHandle: NODE_HANDLE_IDS.RIGHT_TARGET }
+    : { sourceHandle: NODE_HANDLE_IDS.RIGHT_SOURCE, targetHandle: NODE_HANDLE_IDS.LEFT_TARGET };
 }
 
 /** Merges caller options with the defaults and discards invalid values. */

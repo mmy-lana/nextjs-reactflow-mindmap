@@ -20,6 +20,7 @@ import { RootNode } from "@/components/nodes/RootNode";
 import { BranchNode } from "@/components/nodes/BranchNode";
 import { LeafNode } from "@/components/nodes/LeafNode";
 import { OrganicBranchEdge } from "@/components/edges/OrganicBranchEdge";
+import { collectDescendants } from "@/lib/treeTransforms";
 import type { CanvasEdge, CanvasNode } from "@/types/mindmap";
 
 /**
@@ -60,6 +61,11 @@ export function MindMapCanvas(): React.JSX.Element {
   const setSelectedNodeId = useMindMapStore((state) => state.setSelectedNodeId);
   const updateViewport = useMindMapStore((state) => state.updateViewport);
 
+  const rootNodeId = useMemo(
+    () => nodes.find((node) => node.data.depth === 0)?.id ?? null,
+    [nodes],
+  );
+
   /**
    * A fresh document records the identity viewport, and a document the user has
    * panned records a different one. Treating "still at the identity" as "never
@@ -73,7 +79,20 @@ export function MindMapCanvas(): React.JSX.Element {
   );
 
   const onMoveEnd = useCallback<OnMoveEnd>(
-    (_event, viewport) => {
+    (event, viewport) => {
+      /**
+       * Framing is not an edit.
+       *
+       * React Flow reports its own programmatic moves (the opening `fitView`,
+       * a zoom from a control that calls `getViewport`) with a null event, and
+       * a real drag or pinch with the pointer event that caused it. Writing
+       * the viewport back to the document on the first kind marked a freshly
+       * opened map as having unsaved changes before the user had touched
+       * anything, which is the state the dirty badge is supposed to rule out.
+       */
+      if (event === null) {
+        return;
+      }
       updateViewport({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
     },
     [updateViewport],
@@ -89,9 +108,19 @@ export function MindMapCanvas(): React.JSX.Element {
   );
 
   /**
-   * Refuses a drop that would give a node a second parent or close a cycle.
-   * The store enforces the same rule, so this only saves the user the flicker
-   * of a connection that is about to be rejected.
+   * Refuses a drop that would damage the tree.
+   *
+   * Four rules, all of which the store re-checks in `onConnect`: this callback
+   * only saves the user the flicker of a connection that is about to be
+   * rejected, and it never guarantees the result.
+   *
+   * 1. The root is the anchor of every layout. A child attached to it would
+   *    give the map a second root.
+   * 2. A node cannot be its own child.
+   * 3. A node cannot hang below itself. `collectDescendants` is cycle guarded, so
+   *    a graph that already contains a loop still terminates here.
+   * 4. A node has exactly one parent, so a target that already has an inbound
+   *    edge is not a legal drop site.
    */
   const isValidConnection = useCallback<IsValidConnection<CanvasEdge>>(
     (connection) => {
@@ -101,9 +130,15 @@ export function MindMapCanvas(): React.JSX.Element {
       if (connection.source === connection.target) {
         return false;
       }
+      if (connection.target === rootNodeId) {
+        return false;
+      }
+      if (collectDescendants(connection.target, edges).includes(connection.source)) {
+        return false;
+      }
       return !edges.some((edge) => edge.target === connection.target);
     },
-    [edges],
+    [edges, rootNodeId],
   );
 
   return (
