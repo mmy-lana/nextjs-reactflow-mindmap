@@ -751,6 +751,13 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       );
       const direction = resolveNewChildDirection(parent, siblings, child.data.direction);
 
+      const fallbackHandles = resolveEdgeHandleIds(
+        direction === 'LEFT' ? 'LEFT' : 'RIGHT',
+        get().layoutOptions.direction,
+        verticalCenter(parent),
+        verticalCenter(child),
+      );
+
       const nextEdges = [
         // One parent per node: drop whichever link the child had before.
         ...edges.filter((edge) => edge.target !== target),
@@ -759,12 +766,8 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
           target,
           depth,
           branchColor: resolveBranchColor(depth),
-          // The handles the user actually dragged between are kept verbatim.
-          // Re-deriving them here is what made a hand made connection render as
-          // a straight line through both nodes, or not render at all when the
-          // guess named a face the node does not mount.
-          sourceHandle: connection.sourceHandle ?? null,
-          targetHandle: connection.targetHandle ?? null,
+          sourceHandle: connection.sourceHandle ?? fallbackHandles.sourceHandle,
+          targetHandle: connection.targetHandle ?? fallbackHandles.targetHandle,
         }),
       ];
 

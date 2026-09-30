@@ -78,8 +78,8 @@ export function NodeHandleGroup({
   ];
 
   const sources: readonly HandleFace[] = [
-    { id: NODE_HANDLE_IDS.LEFT_SOURCE, position: Position.Left, active: !isRadial && onLeft },
-    { id: NODE_HANDLE_IDS.RIGHT_SOURCE, position: Position.Right, active: !isRadial && !onLeft },
+    { id: NODE_HANDLE_IDS.LEFT_SOURCE, position: Position.Left, active: !isRadial && (isRoot || onLeft) },
+    { id: NODE_HANDLE_IDS.RIGHT_SOURCE, position: Position.Right, active: !isRadial && (isRoot || !onLeft) },
     { id: NODE_HANDLE_IDS.TOP_SOURCE, position: Position.Top, active: isRadial },
     { id: NODE_HANDLE_IDS.BOTTOM_SOURCE, position: Position.Bottom, active: isRadial },
   ];

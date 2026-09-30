@@ -355,15 +355,27 @@ export async function deletePreference(key: string): Promise<void> {
 
 /** Strips the canvas payload, keeping the indexed metadata columns. */
 function toDocumentMeta(record: LocalDocumentRecord): MindMapDocument {
+  let title = record.title;
+  if (title.trim() === UNNAMED_DOCUMENT_TITLE && Array.isArray(record.data?.nodes)) {
+    const root = record.data.nodes.find(
+      (node) => node.type === 'root' || (node.data && node.data.depth === 0),
+    );
+    const rootLabel = root?.data?.label?.trim();
+    if (rootLabel && rootLabel !== 'Central Concept' && rootLabel !== 'New Idea') {
+      title = rootLabel;
+    }
+  }
+
   return {
     id: record.id,
-    title: record.title,
+    title,
     description: record.description,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     nodeCount: record.nodeCount,
     viewport: record.viewport,
     tags: [...record.tags],
+    layoutOptions: record.data?.meta?.layoutOptions ?? record.layoutOptions,
   };
 }
 
