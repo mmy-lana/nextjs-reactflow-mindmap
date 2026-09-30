@@ -128,6 +128,15 @@ export interface MindMapDocument {
   nodeCount: number;
   viewport: ViewportState;
   tags: string[];
+  /**
+   * Layout the map was last drawn with.
+   *
+   * Persisted so reopening a document restores the arrangement the author
+   * chose. Without it every reload fell back to the defaults, and a radial map
+   * came back horizontal with its edges re-wired under the author's eyes.
+   * Absent on records written by older builds, which is why it is optional.
+   */
+  layoutOptions?: LayoutOptions;
 }
 
 /** Portable, self contained serialization of a whole mind map. */
@@ -137,6 +146,15 @@ export interface MindMapExportPayload {
   meta: MindMapDocument;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
+  /**
+   * Convenience mirror of `meta.layoutOptions`.
+   *
+   * `meta` is the canonical location and is what an export writes; this top level
+   * copy is accepted on import so a hand written or tool generated file can
+   * carry the layout without nesting it. Import folds it into `meta`, after which
+   * the two can never disagree.
+   */
+  layoutOptions?: LayoutOptions;
 }
 
 /** Tunables of the pure layout engine. */
@@ -200,6 +218,15 @@ export const UNNAMED_DOCUMENT_TITLE = 'Untitled Mind Map';
 export const UNNAMED_NODE_LABEL = 'New Idea';
 
 /**
+ * Label the root node is created with.
+ *
+ * A root still carrying it is treated as "never named", which is what lets a
+ * document adopt a real root label as its title on load instead of adopting a
+ * placeholder the user never typed.
+ */
+export const DEFAULT_ROOT_LABEL = 'Central Concept';
+
+/**
  * Schema version written into every export payload. Bump it whenever the
  * persisted shape changes in a way that older clients cannot read.
  */
@@ -239,7 +266,20 @@ export const NODE_HANDLE_IDS = {
   RIGHT_TARGET: 'right-target',
   TOP_SOURCE: 'top-source',
   BOTTOM_TARGET: 'bottom-target',
+  BOTTOM_SOURCE: 'bottom-source',
+  TOP_TARGET: 'top-target',
 } as const;
+
+/**
+ * Every handle id a node may be wired to.
+ *
+ * A node mounts all eight of them at all times, so this list is also the set of
+ * ids a persisted edge is allowed to reference. React Flow resolves an edge by
+ * looking its handle id up in the DOM and logs error #008 when it is missing,
+ * which is why the list is exhaustive rather than "the ones the current layout
+ * happens to use".
+ */
+export const ALL_NODE_HANDLE_IDS: readonly NodeHandleId[] = Object.values(NODE_HANDLE_IDS);
 
 export type NodeHandleId = (typeof NODE_HANDLE_IDS)[keyof typeof NODE_HANDLE_IDS];
 
@@ -417,6 +457,34 @@ export function isCanvasEdge(value: unknown): value is CanvasEdge {
 }
 
 /**
+ * Validates a persisted layout description.
+ *
+ * The shape is checked rather than trusted because it comes from storage: a
+ * single non numeric gap would otherwise reach the layout engine as `NaN` and
+ * scatter the whole map. Unknown values are left to
+ * `sanitizeLayoutOptions`, which replaces them with the defaults.
+ */
+export function isLayoutOptions(value: unknown): value is LayoutOptions {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value.horizontalSpacing !== undefined && !isFiniteNumber(value.horizontalSpacing)) {
+    return false;
+  }
+  if (value.verticalSpacing !== undefined && !isFiniteNumber(value.verticalSpacing)) {
+    return false;
+  }
+  if (
+    value.direction !== undefined &&
+    value.direction !== 'HORIZONTAL' &&
+    value.direction !== 'RADIAL'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Validates document level metadata.
  *
  * The name is deliberately scoped to the `meta` object: a full document is
@@ -425,6 +493,9 @@ export function isCanvasEdge(value: unknown): value is CanvasEdge {
  */
 export function isDocumentMeta(value: unknown): value is MindMapDocument {
   if (!isRecord(value)) {
+    return false;
+  }
+  if (value.layoutOptions !== undefined && !isLayoutOptions(value.layoutOptions)) {
     return false;
   }
   return (
@@ -471,6 +542,9 @@ export function containsSingleRootNode(nodes: readonly unknown[]): boolean {
  */
 export function isMindMapExportPayload(value: unknown): value is MindMapExportPayload {
   if (!isRecord(value)) {
+    return false;
+  }
+  if (value.layoutOptions !== undefined && !isLayoutOptions(value.layoutOptions)) {
     return false;
   }
   return (

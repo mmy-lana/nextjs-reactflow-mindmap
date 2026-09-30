@@ -11,6 +11,7 @@
  */
 
 import {
+  ALL_NODE_HANDLE_IDS,
   DEFAULT_EDGE_DATA,
   DEFAULT_NODE_SIZE,
   isBranchSide,
@@ -577,8 +578,38 @@ export function repairMindMapGraph(
       ...acyclic,
       ...synthesized,
     ]),
-    edges: [...acyclic, ...synthesized],
+    edges: normalizeEdgeHandles([...acyclic, ...synthesized]),
   };
+}
+
+/**
+ * Clears handle ids that no node can ever mount.
+ *
+ * React Flow resolves an edge by looking its handle id up in the DOM: an id
+ * that matches nothing makes it log error #008 and render nothing at all, so a
+ * single stale id silently deletes a branch from the canvas. A record written
+ * by a build that mounted a different handle set is the realistic source, and
+ * `null` is the safe answer because React Flow then falls back to the node's own
+ * default handle for that edge type instead of rendering nothing.
+ */
+function normalizeEdgeHandles(edges: readonly CanvasEdge[]): CanvasEdge[] {
+  const known = new Set<string>(ALL_NODE_HANDLE_IDS);
+
+  return edges.map((edge) => {
+    const sourceHandle =
+      typeof edge.sourceHandle === 'string' && known.has(edge.sourceHandle)
+        ? edge.sourceHandle
+        : null;
+    const targetHandle =
+      typeof edge.targetHandle === 'string' && known.has(edge.targetHandle)
+        ? edge.targetHandle
+        : null;
+
+    if (sourceHandle === edge.sourceHandle && targetHandle === edge.targetHandle) {
+      return edge;
+    }
+    return { ...edge, sourceHandle, targetHandle };
+  });
 }
 
 /**

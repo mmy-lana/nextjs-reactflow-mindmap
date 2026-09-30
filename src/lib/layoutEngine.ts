@@ -101,16 +101,37 @@ const MAX_RADIAL_DEPTH = 32;
  * looped back across the target node's own box: the edge started on the face
  * pointing at the child and ended on the face pointing back at the parent.
  *
- * Radial layouts have no left or right, so the pair is the top source and the
- * bottom target. That is the angular alignment a radial wedge needs: the parent
- * hands the edge upwards and the child receives it from below, which reads
- * consistently for a subtree in any quadrant instead of flipping per branch.
+ * A radial layout has no left or right, so the pair is decided by where the
+ * child actually sits. A child below its parent is reached through the parent's
+ * bottom and the child's top; a child above it is reached the other way round.
+ * Pinning one vertical pair for every branch instead is what made a radial edge
+ * in the upper half fold back over its own subtree: the parent handed the edge
+ * out of its top while the child waited at its bottom.
+ *
+ * The two centres are optional because the handle pair is also needed before a
+ * layout has produced any geometry, for instance while a stored document is
+ * being repaired. Without them the pair falls back to the top down default,
+ * which is the reading order of a freshly created map.
  */
 export function resolveEdgeHandleIds(
   side: BranchSide,
   strategy: LayoutStrategy,
+  parentCenterY?: number,
+  childCenterY?: number,
 ): EdgeHandleIds {
   if (strategy === 'RADIAL') {
+    if (typeof parentCenterY === 'number' && typeof childCenterY === 'number') {
+      if (childCenterY >= parentCenterY) {
+        return {
+          sourceHandle: NODE_HANDLE_IDS.BOTTOM_SOURCE,
+          targetHandle: NODE_HANDLE_IDS.TOP_TARGET,
+        };
+      }
+      return {
+        sourceHandle: NODE_HANDLE_IDS.TOP_SOURCE,
+        targetHandle: NODE_HANDLE_IDS.BOTTOM_TARGET,
+      };
+    }
     return {
       sourceHandle: NODE_HANDLE_IDS.TOP_SOURCE,
       targetHandle: NODE_HANDLE_IDS.BOTTOM_TARGET,
@@ -121,8 +142,16 @@ export function resolveEdgeHandleIds(
     : { sourceHandle: NODE_HANDLE_IDS.RIGHT_SOURCE, targetHandle: NODE_HANDLE_IDS.LEFT_TARGET };
 }
 
-/** Merges caller options with the defaults and discards invalid values. */
-function sanitizeOptions(options: Partial<LayoutOptions> | undefined): Required<LayoutOptions> {
+/**
+ * Merges caller options with the defaults and discards invalid values.
+ *
+ * Exported because persisted options are untrusted: a document restored from
+ * storage is normalised here before it reaches the state, so a missing, partial
+ * or hand edited `layoutOptions` can never scatter a map on open.
+ */
+export function sanitizeLayoutOptions(
+  options: Partial<LayoutOptions> | undefined,
+): Required<LayoutOptions> {
   const merged: LayoutOptions = { ...DEFAULT_LAYOUT_OPTIONS, ...(options ?? {}) };
 
   const horizontalSpacing =
@@ -196,7 +225,7 @@ export function calculateMindMapLayout(
     return { nodes: [], edges: [] };
   }
 
-  const settings = sanitizeOptions(options);
+  const settings = sanitizeLayoutOptions(options);
   const resolvableEdges = filterResolvableEdges(nodes, edges);
   const rootNode = findRootNode(nodes);
 
@@ -236,7 +265,7 @@ export function calculateMindMapLayout(
 
   return {
     nodes: synchronizedNodes,
-    edges: wireEdges(synchronizedNodes, resolvableEdges, context.sides, settings.direction),
+    edges: wireEdges(synchronizedNodes, resolvableEdges, context.sides, context.geometry, settings.direction),
   };
 }
 
@@ -439,11 +468,18 @@ function layoutRadial(context: LayoutContext): void {
   }
 }
 
-/** Re-wires handles and refreshes the branch colour of every edge. */
+/**
+ * Re-wires handles and refreshes the branch colour of every edge.
+ *
+ * The centres produced by the layout pass are handed to `resolveEdgeHandleIds`
+ * so a radial edge leaves through the face that actually points at its child
+ * instead of always leaving through the top.
+ */
 function wireEdges(
   nodes: readonly CanvasNode[],
   edges: readonly CanvasEdge[],
   sides: Map<string, BranchSide>,
+  geometry: Map<string, NodeGeometry>,
   strategy: LayoutStrategy,
 ): CanvasEdge[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
@@ -453,7 +489,12 @@ function wireEdges(
     const parent = nodeById.get(edge.source);
     const side: BranchSide =
       sides.get(edge.target) ?? (child?.data.direction === 'LEFT' ? 'LEFT' : 'RIGHT');
-    const handles = resolveEdgeHandleIds(side, strategy);
+    const handles = resolveEdgeHandleIds(
+      side,
+      strategy,
+      geometry.get(edge.source)?.centerY,
+      geometry.get(edge.target)?.centerY,
+    );
     const depth = Math.max(child?.data.depth ?? parent?.data.depth ?? 1, 1);
 
     return {

@@ -23,10 +23,12 @@ import {
   type NodeChange,
 } from "@xyflow/react";
 import {
+  DEFAULT_ROOT_LABEL,
   MINDMAP_SCHEMA_VERSION,
   MAX_HISTORY_ENTRIES,
   SAVE_DEBOUNCE_MS,
   UNNAMED_DOCUMENT_TITLE,
+  UNNAMED_NODE_LABEL,
   type ActiveDrawerType,
   type CanvasEdge,
   type CanvasNode,
@@ -54,9 +56,14 @@ import {
   normalizeSiblingOrders,
   reindexNodeMetadata,
   repairMindMapGraph,
+  resolveNodeSize,
   sortSiblingsByOrder,
 } from "@/lib/treeTransforms";
-import { calculateMindMapLayout } from "@/lib/layoutEngine";
+import {
+  calculateMindMapLayout,
+  resolveEdgeHandleIds,
+  sanitizeLayoutOptions,
+} from "@/lib/layoutEngine";
 import {
   DocumentRepositoryError,
   createDocument,
@@ -255,12 +262,17 @@ export interface MindMapActions {
    * The title is optional so the importer can adopt the file's name or keep the
    * current one. Either way it lands in the same history step as the nodes: an
    * import that half applied is worse than one that is easy to undo.
+   *
+   * `layoutOptions` travels with it because an import carries edges that are
+   * already wired to the faces its own layout used; adopting the layout along
+   * with them is what keeps those edges renderable on the next pass.
    */
   replaceCanvas: (
     nodes: CanvasNode[],
     edges: CanvasEdge[],
     description: string,
     title?: string,
+    layoutOptions?: LayoutOptions,
   ) => void;
   clearDocument: () => void;
   undo: () => Promise<void>;
@@ -381,6 +393,14 @@ function renumberSiblingGroups(
  * snap back on every add. So the layout is computed for its result and only the
  * one new position is kept; everything the user has placed stays put.
  *
+ * That single position is not enough on its own. The layout was computed against
+ * a whole new arrangement, so the edges it returns are wired to faces that only
+ * make sense in that arrangement: keeping them while keeping the old positions
+ * leaves an edge leaving through a face that no longer points at its child.
+ * Committing the whole layout instead has the same defect from the other side,
+ * plus it would snap every dragged node home. So only the one new branch edge is
+ * touched, and it is re-wired against the positions that are actually committed.
+ *
  * `edges` is the list *including* the new branch edge, because the engine
  * derives the tree from edges rather than from `data.parentId`.
  */
@@ -389,16 +409,38 @@ function placeNewNode(
   edges: CanvasEdge[],
   newNodeId: string,
   options: LayoutOptions,
-): CanvasNode[] {
-  const laidOut = calculateMindMapLayout(nodes, edges, options).nodes.find(
-    (node) => node.id === newNodeId,
-  );
-  if (!laidOut) {
-    return nodes;
+): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  const laidOut = calculateMindMapLayout(nodes, edges, options);
+  const positioned = laidOut.nodes.find((node) => node.id === newNodeId);
+  if (!positioned) {
+    return { nodes, edges };
   }
-  return nodes.map((node) =>
-    node.id === newNodeId ? { ...node, position: laidOut.position } : node,
+
+  const placedNodes = nodes.map((node) =>
+    node.id === newNodeId ? { ...node, position: positioned.position } : node,
   );
+
+  const parentNode = placedNodes.find((node) => node.id === positioned.data.parentId);
+  if (!parentNode) {
+    return { nodes: placedNodes, edges };
+  }
+
+  const handles = resolveEdgeHandleIds(
+    positioned.data.direction === 'LEFT' ? 'LEFT' : 'RIGHT',
+    options.direction,
+    verticalCenter(parentNode),
+    verticalCenter(positioned),
+  );
+
+  return {
+    nodes: placedNodes,
+    edges: edges.map((edge) => (edge.target === newNodeId ? { ...edge, ...handles } : edge)),
+  };
+}
+
+/** Vertical centre of a node in flow space, which is what a face points at. */
+function verticalCenter(node: CanvasNode): number {
+  return node.position.y + resolveNodeSize(node).height / 2;
 }
 
 /** Flags nodes hidden by the current collapse state, and their edges. */
@@ -485,6 +527,11 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
    * `nodeCount` and `updatedAt` are derived here rather than trusted from the
    * in-memory metadata, which the dashboard reads: a stale count in the
    * document record would otherwise survive every save.
+   *
+   * The layout travels with the payload for the same reason. It is the state
+   * that decides how every edge is wired, so a document that saved its nodes and
+   * edges but not its layout reopened with the previous direction and silently
+   * re-routed the whole map under the author.
    */
   const buildPayload = (): MindMapExportPayload | null => {
     const { meta, nodes, edges } = get();
@@ -493,7 +540,12 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
     }
     return {
       version: MINDMAP_SCHEMA_VERSION,
-      meta: { ...meta, nodeCount: nodes.length, updatedAt: Date.now() },
+      meta: {
+        ...meta,
+        nodeCount: nodes.length,
+        updatedAt: Date.now(),
+        layoutOptions: get().layoutOptions,
+      },
       nodes,
       edges,
     };
@@ -707,6 +759,12 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
           target,
           depth,
           branchColor: resolveBranchColor(depth),
+          // The handles the user actually dragged between are kept verbatim.
+          // Re-deriving them here is what made a hand made connection render as
+          // a straight line through both nodes, or not render at all when the
+          // guess named a face the node does not mount.
+          sourceHandle: connection.sourceHandle ?? null,
+          targetHandle: connection.targetHandle ?? null,
         }),
       ];
 
@@ -808,14 +866,19 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         source: parentId,
         target: child.id,
         depth: child.data.depth,
+        ...resolveEdgeHandleIds(
+          child.data.direction === 'LEFT' ? 'LEFT' : 'RIGHT',
+          get().layoutOptions.direction,
+        ),
       });
-      const nextEdges = [...edges, branchEdge];
-
-      commit(
-        placeNewNode([...withParentExpanded, child], nextEdges, child.id, get().layoutOptions),
-        nextEdges,
-        true,
+      const placed = placeNewNode(
+        [...withParentExpanded, child],
+        [...edges, branchEdge],
+        child.id,
+        get().layoutOptions,
       );
+
+      commit(placed.nodes, placed.edges, true);
       set({ selectedNodeId: child.id });
       persist('Add Node');
     },
@@ -843,14 +906,19 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         source: parent.id,
         target: sibling.id,
         depth: sibling.data.depth,
+        ...resolveEdgeHandleIds(
+          sibling.data.direction === 'LEFT' ? 'LEFT' : 'RIGHT',
+          get().layoutOptions.direction,
+        ),
       });
-      const nextEdges = [...edges, branchEdge];
-
-      commit(
-        placeNewNode([...nodes, sibling], nextEdges, sibling.id, get().layoutOptions),
-        nextEdges,
-        true,
+      const placed = placeNewNode(
+        [...nodes, sibling],
+        [...edges, branchEdge],
+        sibling.id,
+        get().layoutOptions,
       );
+
+      commit(placed.nodes, placed.edges, true);
       set({ selectedNodeId: sibling.id });
       persist('Add Sibling');
     },
@@ -1069,6 +1137,13 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
           return rest as CanvasNode;
         });
         commit(cleared, laidOut.edges, true);
+        // The layout is part of the document, not a session preference: it is
+        // written into the metadata so `persist` saves it together with the
+        // edges it produced.
+        const currentMeta = get().meta;
+        if (currentMeta) {
+          set({ meta: { ...currentMeta, layoutOptions: resolved } });
+        }
         persist(resolved.direction === 'RADIAL' ? 'Apply Radial Layout' : 'Apply Horizontal Layout');
       } finally {
         set({ isLayoutRunning: false });
@@ -1137,7 +1212,7 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       get().scheduleSave();
     },
 
-    replaceCanvas: (nextNodes, nextEdges, description, title) => {
+    replaceCanvas: (nextNodes, nextEdges, description, title, layoutOptions) => {
       const { meta } = get();
       if (!meta) {
         return;
@@ -1152,12 +1227,20 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
         const { hidden: _hidden, ...rest } = node;
         return { ...rest, data: { ...rest.data, isCollapsed: false } } as CanvasNode;
       });
+      // The payload's own layout wins, because its edges were wired for it.
+      const restoredLayout =
+        layoutOptions === undefined ? undefined : sanitizeLayoutOptions(layoutOptions);
+      if (restoredLayout) {
+        set({ layoutOptions: restoredLayout });
+      }
+
       commit(expanded, repaired.edges, true);
       set({
         meta: {
           ...meta,
           description,
           ...(title === undefined ? {} : { title: title.trim().slice(0, 120) || meta.title }),
+          ...(restoredLayout === undefined ? {} : { layoutOptions: restoredLayout }),
         },
         selectedNodeId: null,
         editingNodeId: null,
@@ -1227,6 +1310,33 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
   };
 });
 
+/**
+ * Decides the title a restored document opens with.
+ *
+ * Older builds renamed the root node without touching the document title, so a
+ * real document sat in the list under "Untitled Mind Map" forever and every
+ * reopen showed the placeholder again. When the stored title is still the
+ * placeholder and the root carries a label the author actually typed, the root
+ * wins and the document is renamed on the next save.
+ *
+ * A title the author chose is never overwritten, and the placeholder *node*
+ * labels never win either: that is what stops a list of fresh maps from filling
+ * up with copies of "Central Concept" the moment they are opened.
+ */
+export function resolveRestoredTitle(storedTitle: string, nodes: readonly CanvasNode[]): string {
+  const title = storedTitle.trim();
+  if (title !== UNNAMED_DOCUMENT_TITLE) {
+    return storedTitle;
+  }
+
+  const root = findRootNode(nodes);
+  const rootLabel = root ? root.data.label.trim() : '';
+  if (rootLabel === '' || rootLabel === DEFAULT_ROOT_LABEL || rootLabel === UNNAMED_NODE_LABEL) {
+    return storedTitle;
+  }
+  return rootLabel;
+}
+
 /** Fills the store from a stored record and seeds the history cursor. */
 function hydrate(
   set: (partial: Partial<MindMapState>) => void,
@@ -1241,9 +1351,19 @@ function hydrate(
   // roots, a dangling edge or a detached component.
   const repaired = repairMindMapGraph(nodes, edges);
   const visible = withCollapsedVisibility(repaired.nodes, repaired.edges);
+
+  // The stored layout is normalised rather than trusted: it came from disk, and
+  // a single malformed gap must not be allowed to scatter the map on open. A
+  // record with no layout keeps whatever the app is already configured with.
+  const restoredLayout = sanitizeLayoutOptions(meta.layoutOptions ?? get().layoutOptions);
+
+  // Title self healing.
+  const syncedTitle = resolveRestoredTitle(meta.title, repaired.nodes);
+
   set({
     documentId: meta.id,
-    meta,
+    meta: { ...meta, title: syncedTitle, layoutOptions: restoredLayout },
+    layoutOptions: restoredLayout,
     nodes: visible.nodes,
     edges: visible.edges,
     history: [],
@@ -1258,6 +1378,14 @@ function hydrate(
   // Snapshot #0 is the document as stored, so the first real mutation can be
   // undone back to the state the user opened.
   get().pushHistorySnapshot('Open Map');
+
+  // A repaired title is only repaired on screen until it is written back, and
+  // the record on disk is what the map list reads. This is the one case where
+  // merely opening a document marks it dirty; a document that needed no repair
+  // stays silent, which is what keeps the badge honest.
+  if (syncedTitle !== meta.title) {
+    get().scheduleSave();
+  }
 }
 
 installUnloadFlush();

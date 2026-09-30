@@ -170,6 +170,9 @@ export function ExportImportModal({ isOpen, onClose }: ExportImportModalProps): 
         // an offset nobody chose.
         viewport: { x: 0, y: 0, zoom: 1 },
         tags: [...staged.tags],
+        // The file's edges are wired for the file's layout, so the layout has to
+        // travel with them or the new map renders with unreachable edges.
+        ...(staged.layoutOptions === undefined ? {} : { layoutOptions: staged.layoutOptions }),
       };
       await saveDocumentSerialized(id, {
         version: MINDMAP_SCHEMA_VERSION,
@@ -190,7 +193,13 @@ export function ExportImportModal({ isOpen, onClose }: ExportImportModalProps): 
     if (!staged) {
       return;
     }
-    replaceCanvas(staged.nodes, staged.edges, staged.description, staged.title);
+    replaceCanvas(
+      staged.nodes,
+      staged.edges,
+      staged.description,
+      staged.title,
+      staged.layoutOptions,
+    );
     reset();
     onClose();
   }, [onClose, replaceCanvas, reset, staged]);

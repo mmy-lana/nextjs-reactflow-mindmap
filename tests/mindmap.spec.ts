@@ -2,7 +2,9 @@ import { expect, test, type Page, type Locator } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
 /**
- * End to end coverage for the fourteen remediation defects.
+ * End to end coverage for the remediation defects, in the order they were
+ * reported: the fourteen from the first pass, then the edge, layout and title
+ * defects found on the second.
  *
  * Every test opens its own document by id: the `/map/<id>` route creates a map
  * that is not stored yet, so no test depends on another one's state, and the
@@ -442,4 +444,156 @@ test('DATA-03 renaming the root renames the document', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Product Vision' })).toBeVisible();
   await expect(page.getByTestId('node-root')).toContainText('Product Vision');
   await expect(headerText(page)).not.toContainText('Unsaved changes');
+});
+
+test('EDGE-01, EDGE-02 and DATA-05 a radial map keeps its edges across a reload', async ({
+  page,
+}) => {
+  // Error #008 is logged by React Flow itself whenever an edge names a handle
+  // the node does not have in the DOM, so the only way to assert it is gone is
+  // to listen for the whole session and count what it says. Anything that is not
+  // a React Flow 008 is deliberately ignored: unrelated noise should not be
+  // able to fail this test, and unrelated noise should not be able to hide it
+  // either.
+  const unrenderableEdgeErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning' || message.type() === 'error') {
+      if (/reactflow\.dev\/error#008/i.test(message.text())) {
+        unrenderableEdgeErrors.push(message.text());
+      }
+    }
+  });
+  page.on('pageerror', (error) => {
+    if (/error#008/i.test(error.message)) {
+      unrenderableEdgeErrors.push(error.message);
+    }
+  });
+
+  await openNewMap(page);
+
+  // Two children of the root, so the switch to radial has something to
+  // redistribute. The root is re-selected each time because the Add button
+  // relabels itself to "Add child node" once a node is selected, and a plain
+  // second click would build a grandchild instead of a second branch.
+  await page.getByTestId('node-root').click();
+  await addChildToSelection(page);
+  await page.getByTestId('node-root').click();
+  await addChildToSelection(page);
+  await expect(nodeWrappers(page)).toHaveCount(3);
+  await expect(page.locator('.react-flow__edge-path')).toHaveCount(2);
+
+  await page.getByRole('button', { name: 'Layout' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Layout' });
+  await expect(sheet).toBeVisible();
+
+  // A radial pass re-wires every edge to a vertical face, and a direction the
+  // node does not mount is what made the edge silently vanish: the path element
+  // was never drawn, leaving a branch that looks like a floating label.
+  await sheet.getByRole('button', { name: /^Radial/ }).click();
+  await sheet.getByRole('button', { name: 'Apply' }).click();
+  await expect(sheet).toBeHidden();
+
+  await expect(page.locator('.react-flow__edge-path')).toHaveCount(2);
+  await expect(headerText(page)).toContainText('Saved');
+
+  // The reload is the real assertion. The layout has to come back out of the
+  // stored document, and the handles the restored edges point at have to be the
+  // ones the restored nodes actually mount.
+  await page.reload();
+  await expect(page.getByTestId('node-root')).toBeVisible();
+  await expect.poll(() => page.locator('.react-flow__edge-path').count()).toBe(2);
+
+  // Radial specifically, not merely "some layout": the direction button is
+  // pressed for the direction the map is actually drawn in.
+  await page.getByRole('button', { name: 'Layout' }).click();
+  const reopened = page.getByRole('dialog', { name: 'Layout' });
+  await expect(reopened).toBeVisible();
+  await expect(reopened.getByRole('button', { name: /^Radial/ })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect(reopened.getByRole('button', { name: /^Horizontal/ })).toHaveAttribute(
+    'aria-pressed',
+    'false',
+  );
+  await reopened.getByRole('button', { name: 'Close' }).click();
+  await expect(reopened).toBeHidden();
+
+  await expect(page.locator('.react-flow__edge-path')).toHaveCount(2);
+  expect(unrenderableEdgeErrors, unrenderableEdgeErrors.join('\n')).toEqual([]);
+});
+
+test('DATA-05 a record whose title is still the placeholder adopts the root label', async ({
+  page,
+}) => {
+  await openNewMap(page);
+
+  // A real document with a real name, written the current way.
+  const root = page.getByTestId('node-root');
+  await root.dblclick();
+  const field = page.getByRole('textbox', { name: 'Root label' });
+  await expect(field).toBeVisible();
+  await field.fill('Engineering Roadmap');
+  await field.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Engineering Roadmap' })).toBeVisible();
+  await expect(headerText(page)).toContainText('Saved');
+
+  const documentId = new URL(page.url()).pathname.split('/').pop() ?? '';
+  expect(documentId).not.toBe('');
+
+  // Rewind the stored title to what an older build wrote: the root was renamed,
+  // the document metadata was not. Both copies are reverted, because the map
+  // list reads the top level field and the editor reads the payload's.
+  const rewritten = await page.evaluate(
+    ({ id, title }) =>
+      new Promise<{ title: string; payloadTitle: string }>((resolve, reject) => {
+        const open = indexedDB.open('MindMapCanvasDB');
+        open.onerror = () => {
+          reject(new Error('the document database could not be opened'));
+        };
+        open.onsuccess = () => {
+          const database = open.result;
+          const transaction = database.transaction('documents', 'readwrite');
+          const store = transaction.objectStore('documents');
+          const read = store.get(id);
+          read.onerror = () => {
+            reject(new Error('the record could not be read'));
+          };
+          read.onsuccess = () => {
+            const record = read.result as
+              | { title: string; data: { meta: { title: string } } }
+              | undefined;
+            if (record === undefined) {
+              reject(new Error('the document was not stored under that id'));
+              return;
+            }
+            record.title = title;
+            record.data.meta.title = title;
+            const write = store.put(record);
+            write.onerror = () => {
+              reject(new Error('the record could not be written back'));
+            };
+            write.onsuccess = () => {
+              resolve({ title: record.title, payloadTitle: record.data.meta.title });
+            };
+          };
+        };
+      }),
+    { id: documentId, title: UNNAMED_TITLE },
+  );
+  expect(rewritten.title).toBe(UNNAMED_TITLE);
+  expect(rewritten.payloadTitle).toBe(UNNAMED_TITLE);
+
+  // Opening it must repair the title rather than showing the placeholder that
+  // the record still carries.
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Engineering Roadmap' })).toBeVisible();
+  await expect(page.getByTestId('node-root')).toContainText('Engineering Roadmap');
+  await expect(page.getByRole('heading', { name: UNNAMED_TITLE })).toHaveCount(0);
+
+  // The repair is not a display trick: the corrected title is what gets saved,
+  // so reopening once more reads a document that is already consistent.
+  await expect(headerText(page)).toContainText('Saved');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Engineering Roadmap' })).toBeVisible();
 });

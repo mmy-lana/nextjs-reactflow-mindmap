@@ -15,11 +15,13 @@ import {
   isMindMapExportPayload,
   type CanvasEdge,
   type CanvasNode,
+  type LayoutOptions,
   type MindMapDocument,
   type MindMapExportPayload,
 } from "@/types/mindmap";
 import { createUuid } from "@/lib/nodeFactory";
 import { repairMindMapGraph } from "@/lib/treeTransforms";
+import { sanitizeLayoutOptions } from "@/lib/layoutEngine";
 
 /** Fields that must never survive a round trip through a file. */
 const TRANSIENT_NODE_KEYS = ['selected', 'dragging', 'measured', 'width', 'height'] as const;
@@ -135,6 +137,15 @@ export interface ImportedMindMap {
   tags: string[];
   /** How many nodes the file contained before the copy was given new ids. */
   sourceNodeCount: number;
+  /**
+   * Layout the file was drawn with, normalised.
+   *
+   * The edges in a payload are wired to the faces that layout uses, so the two
+   * have to travel together: importing a radial file into a session configured
+   * for horizontal would leave every edge asking for a face the canvas is no
+   * longer routing through. `undefined` for a file that predates the field.
+   */
+  layoutOptions?: LayoutOptions;
 }
 
 /**
@@ -242,6 +253,13 @@ export function importFromJson(jsonString: string): ImportedMindMap {
   // still imports into a single consistent tree.
   const repaired = repairMindMapGraph(nodes, edges);
 
+  /**
+   * `meta.layoutOptions` is canonical; the top level mirror is only consulted for
+   * a file that does not carry one, so a normalising export and a hand written
+   * file both import and never disagree afterwards.
+   */
+  const storedLayout = payload.meta.layoutOptions ?? payload.layoutOptions;
+
   return {
     nodes: repaired.nodes.map((node) => ({ ...node, hidden: false })),
     edges: repaired.edges,
@@ -249,6 +267,9 @@ export function importFromJson(jsonString: string): ImportedMindMap {
     description: payload.meta.description,
     tags: payload.meta.tags,
     sourceNodeCount: payload.nodes.length,
+    ...(storedLayout === undefined
+      ? {}
+      : { layoutOptions: sanitizeLayoutOptions(storedLayout) }),
   };
 }
 

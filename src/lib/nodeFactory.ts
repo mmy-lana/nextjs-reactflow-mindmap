@@ -14,7 +14,6 @@ import {
   DEFAULT_NODE_STYLE,
   ROOT_NODE_STYLE,
   UNNAMED_NODE_LABEL,
-  type BranchSide,
   type CanvasEdge,
   type CanvasNode,
   type MindMapNodeData,
@@ -222,22 +221,4 @@ export function createBranchEdge(params: CreateBranchEdgeParams): CanvasEdge {
   }
 
   return edge;
-}
-
-/** Convenience wrapper binding a branch edge to a specific side of the root. */
-export function createSideBranchEdge(params: {
-  source: string;
-  target: string;
-  depth: NodeDepth;
-  side: BranchSide;
-  sourceHandle: string;
-  targetHandle: string;
-}): CanvasEdge {
-  return createBranchEdge({
-    source: params.source,
-    target: params.target,
-    depth: params.depth,
-    sourceHandle: params.sourceHandle,
-    targetHandle: params.targetHandle,
-  });
 }
