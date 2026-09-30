@@ -28,7 +28,7 @@ import {
   type MindMapExportPayload,
   type ViewportState,
 } from '@/types/mindmap';
-import { createRootNode } from '@/lib/nodeFactory';
+import { createRootNode, createUuid } from '@/lib/nodeFactory';
 import { getDB, type AppPreferencesRecord, type LocalDocumentRecord } from './schema';
 
 /** Stable error codes surfaced to the UI. */
@@ -121,32 +121,54 @@ function assertNonEmptyId(id: string, parameterName: string): void {
   }
 }
 
+export interface CreateDocumentOptions {
+  /**
+   * Forces the identifier of both the document and its root node.
+   *
+   * The editor is reached through `/map/[id]`, so a route parameter that has no
+   * stored record yet must become the new document id. Omitting the option
+   * generates a fresh id instead.
+   */
+  id?: string;
+  description?: string;
+  tags?: readonly string[];
+}
+
 /**
  * Creates a document seeded with its root concept and returns its id.
  *
  * @param title Requested title; blank or over-long input is normalized.
- * @throws {DocumentRepositoryError} `invalid_input` for a non-string title,
- *         `write_failed` when IndexedDB refuses the write.
+ * @param options Optional id and metadata overrides.
+ * @throws {DocumentRepositoryError} `invalid_input` for a non-string title or
+ *         a blank id, `write_failed` when IndexedDB refuses the write.
  */
-export async function createDocument(title: string): Promise<string> {
+export async function createDocument(
+  title: string,
+  options: CreateDocumentOptions = {},
+): Promise<string> {
   if (typeof title !== 'string') {
     throw new DocumentRepositoryError('invalid_input', 'A document title must be a string.');
   }
+  if (options.id !== undefined) {
+    assertNonEmptyId(options.id, 'id');
+  }
 
   const now = Date.now();
-  const rootNode = createRootNode({ createdAt: now, updatedAt: now });
+  const id = options.id ?? createUuid();
+  // The root node shares the document id, which makes "is this the root?"
+  // answerable without a second lookup.
+  const rootNode = createRootNode({ id, createdAt: now, updatedAt: now });
   const resolvedTitle = normalizeDocumentTitle(title);
-  const id = rootNode.id;
 
   const meta: MindMapDocument = {
     id,
     title: resolvedTitle,
-    description: '',
+    description: options.description ?? '',
     createdAt: now,
     updatedAt: now,
     nodeCount: 1,
     viewport: defaultViewport(),
-    tags: [],
+    tags: [...(options.tags ?? [])],
   };
 
   const record: LocalDocumentRecord = {
