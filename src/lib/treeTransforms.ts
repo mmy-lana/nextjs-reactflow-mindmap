@@ -373,9 +373,10 @@ export function buildAcyclicChildIndex(
 /**
  * Repairs derived node metadata after the edge set changed.
  *
- * `data.parentId` and `data.childCount` are mirrors of the graph; recomputing
- * them keeps a map loaded from disk (or from an imported file) consistent.
- * Every other field, including the position, is preserved.
+ * `data.parentId`, `data.childCount` and `data.depth` are mirrors of the graph;
+ * recomputing them keeps a map loaded from disk (or from an imported file, or
+ * after a re-parent) consistent. Every other field, including the position, is
+ * preserved.
  */
 export function reindexNodeMetadata(
   nodes: readonly CanvasNode[],
@@ -384,6 +385,7 @@ export function reindexNodeMetadata(
   const lookup = buildNodeLookup(nodes);
   const parentByChild = new Map<string, string>();
   const childCountByParent = new Map<string, number>();
+  const childIdsByParent = new Map<string, string[]>();
 
   for (const edge of edges) {
     if (!lookup.has(edge.source) || !lookup.has(edge.target)) {
@@ -396,14 +398,50 @@ export function reindexNodeMetadata(
       parentByChild.set(edge.target, edge.source);
     }
     childCountByParent.set(edge.source, (childCountByParent.get(edge.source) ?? 0) + 1);
+    const siblings = childIdsByParent.get(edge.source);
+    if (siblings) {
+      siblings.push(edge.target);
+    } else {
+      childIdsByParent.set(edge.source, [edge.target]);
+    }
+  }
+
+  // Breadth first from every parentless node, so a node can only be reached by
+  // one path and no node is visited twice.
+  const depthById = new Map<string, number>();
+  const queue: string[] = [];
+  for (const node of nodes) {
+    if (!parentByChild.has(node.id)) {
+      depthById.set(node.id, 0);
+      queue.push(node.id);
+    }
+  }
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const nodeId = queue[cursor];
+    const depth = (depthById.get(nodeId) ?? 0) + 1;
+    for (const childId of childIdsByParent.get(nodeId) ?? []) {
+      if (!depthById.has(childId)) {
+        depthById.set(childId, depth);
+        queue.push(childId);
+      }
+    }
   }
 
   return nodes.map((node) => {
     const parentId = parentByChild.get(node.id) ?? null;
     const childCount = childCountByParent.get(node.id) ?? 0;
-    const type = node.type === 'root' ? node.type : node.data.depth === 0 ? 'root' : childCount > 0 ? 'branch' : 'leaf';
+    // A node in a cycle is unreachable from a root; its stored depth is kept
+    // rather than reset, so the inconsistency stays visible instead of being
+    // silently turned into a second root.
+    const depth = depthById.get(node.id) ?? node.data.depth;
+    const type: CanvasNode['type'] = depth === 0 ? 'root' : childCount > 0 ? 'branch' : 'leaf';
 
-    if (node.data.parentId === parentId && node.data.childCount === childCount && node.type === type) {
+    if (
+      node.data.parentId === parentId &&
+      node.data.childCount === childCount &&
+      node.data.depth === depth &&
+      node.type === type
+    ) {
       return node;
     }
 
@@ -414,6 +452,7 @@ export function reindexNodeMetadata(
         ...node.data,
         parentId,
         childCount,
+        depth,
       },
     };
   });
