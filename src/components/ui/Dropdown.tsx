@@ -32,6 +32,13 @@ export interface DropdownProps {
   /** Trigger content. Defaults to a vertical ellipsis icon. */
   trigger?: ReactNode;
   triggerVariant?: "solid" | "surface" | "ghost" | "danger";
+  /**
+   * Which side of the trigger the menu opens on.
+   *
+   * `top` is the toolbar default; a trigger near the top of a page wants
+   * `bottom` so the menu does not open off screen.
+   */
+  placement?: "top" | "bottom";
   /** Controlled alignment of the menu relative to the trigger. */
   align?: "start" | "end";
   className?: string;
@@ -53,6 +60,7 @@ export function Dropdown({
   onSelect,
   trigger,
   triggerVariant = "surface",
+  placement = "top",
   align = "end",
   className,
 }: DropdownProps) {
@@ -176,8 +184,9 @@ export function Dropdown({
           tabIndex={-1}
           onKeyDown={handleMenuKeyDown}
           className={cn(
-            "absolute bottom-full z-30 mb-2 min-w-[13rem] animate-pop-in",
+            "absolute z-30 min-w-[13rem] animate-pop-in",
             "overflow-hidden rounded-xl border border-node-border bg-surface-overlay py-1 shadow-2xl",
+            placement === "top" ? "bottom-full mb-2" : "top-full mt-2",
             align === "end" ? "right-0" : "left-0",
           )}
         >

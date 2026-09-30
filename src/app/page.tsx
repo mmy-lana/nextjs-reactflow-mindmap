@@ -3,14 +3,23 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FilePlus2, LoaderCircle, Map as MapIcon, Trash2, TriangleAlert } from "lucide-react";
-import { deleteDocument, listDocuments } from "@/db/documentRepository";
+import {
+  Download,
+  FilePlus2,
+  LoaderCircle,
+  Map as MapIcon,
+  MoreHorizontal,
+  RotateCw,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
+import { deleteDocument, getDocument, listDocuments } from "@/db/documentRepository";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
-import { IconButton } from "@/components/ui/IconButton";
+import { Dropdown, type DropdownMenuItem } from "@/components/ui/Dropdown";
 import { createUuid } from "@/lib/nodeFactory";
+import { buildFileName, downloadFile, exportToJson } from "@/lib/exportEngine";
 import { UNNAMED_DOCUMENT_TITLE, type MindMapDocument } from "@/types/mindmap";
-import { cn } from "@/lib/cn";
 
 /**
  * The map list.
@@ -57,6 +66,35 @@ export default function HomePage(): React.JSX.Element {
   const openNewMap = useCallback(() => {
     router.push(`/map/${createUuid()}`);
   }, [router]);
+
+  /**
+   * Writes one stored map to a JSON file.
+   *
+   * Read straight from the repository rather than from the canvas: the editor
+   * never had this document open, and the payload on disk is the one that would
+   * come back from a reload.
+   */
+  const exportMapAsJson = useCallback(async (map: MindMapDocument) => {
+    setError(null);
+    try {
+      const record = await getDocument(map.id);
+      if (!record) {
+        throw new Error(`"${map.title.trim() || UNNAMED_DOCUMENT_TITLE}" is no longer stored here.`);
+      }
+      const json = exportToJson(record.data.nodes, record.data.edges, record.data.meta);
+      downloadFile(
+        buildFileName(map.title.trim() || UNNAMED_DOCUMENT_TITLE, 'json'),
+        json,
+        'application/json',
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error && cause.message.length > 0
+          ? cause.message
+          : 'That map could not be exported.',
+      );
+    }
+  }, []);
 
   const confirmDeletion = useCallback(async () => {
     if (!pendingDeletion) {
@@ -111,13 +149,32 @@ export default function HomePage(): React.JSX.Element {
             <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
             Loading your maps
           </p>
+        ) : state === 'error' ? (
+          // "No maps yet" would be a lie here: the list failed to load, it is
+          // not empty. Offer the one action that can still help.
+          <section className="flex flex-col items-center gap-4 rounded-2xl border border-dashed border-node-border px-6 py-12 text-center">
+            <h2 className="text-base font-medium text-canvas-text">The list did not load</h2>
+            <p className="max-w-sm text-sm text-canvas-muted">
+              This browser refused to read its own storage. Private browsing windows usually do.
+            </p>
+            <Button variant="secondary" onClick={() => void load()}>
+              <RotateCw className="size-4" />
+              Try again
+            </Button>
+          </section>
         ) : maps.length === 0 ? (
           <EmptyState onCreate={openNewMap} />
         ) : (
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {maps.map((map) => (
               <li key={map.id}>
-                <MapCard map={map} onRequestDelete={() => setPendingDeletion(map)} />
+                <MapCard
+                  map={map}
+                  onExport={exportMapAsJson}
+                  onRequestDelete={() => {
+                    setPendingDeletion(map);
+                  }}
+                />
               </li>
             ))}
           </ul>
@@ -192,33 +249,57 @@ function EmptyState({ onCreate }: EmptyStateProps): React.JSX.Element {
 
 interface MapCardProps {
   map: MindMapDocument;
+  onExport: (map: MindMapDocument) => void;
   onRequestDelete: () => void;
 }
 
-function MapCard({ map, onRequestDelete }: MapCardProps): React.JSX.Element {
+function MapCard({ map, onExport, onRequestDelete }: MapCardProps): React.JSX.Element {
   const title = map.title.trim() || UNNAMED_DOCUMENT_TITLE;
 
+  const items: DropdownMenuItem[] = [
+    {
+      value: 'export',
+      label: 'Export as JSON',
+      icon: <Download className="size-4" />,
+    },
+    {
+      value: 'delete',
+      label: 'Delete',
+      icon: <Trash2 className="size-4" />,
+      isDanger: true,
+    },
+  ];
+
   return (
-    <article className="group relative flex h-full flex-col gap-2 rounded-2xl border border-node-border bg-node-surface p-4 transition-colors hover:border-node-border-active">
+    <article className="relative flex h-full flex-col gap-2 rounded-2xl border border-node-border bg-node-surface p-4 transition-colors hover:border-node-border-active">
       <div className="flex items-start justify-between gap-2">
         <h2 className="min-w-0 flex-1 truncate text-base font-medium text-canvas-text">
           <Link
             href={`/map/${map.id}`}
-            className="after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+            className="after:absolute after:inset-0 after:content-[''] focus-visible:underline"
           >
             {title}
           </Link>
         </h2>
-        {/* Above the card's stretched link, so it stays clickable. */}
+        {/* Sits above the card's stretched link, and stays visible: a control that
+            only appears on hover cannot be reached on a touch screen. */}
         <span className="relative z-10">
-          <IconButton
-            label={`Delete ${title}`}
-            variant="ghost"
-            onClick={onRequestDelete}
-            className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-          >
-            <Trash2 className="size-4" />
-          </IconButton>
+          <Dropdown
+            label={`Actions for ${title}`}
+            items={items}
+            placement="bottom"
+            triggerVariant="ghost"
+            trigger={<MoreHorizontal className="size-5" />}
+            onSelect={(value) => {
+              if (value === 'export') {
+                onExport(map);
+                return;
+              }
+              if (value === 'delete') {
+                onRequestDelete();
+              }
+            }}
+          />
         </span>
       </div>
 
@@ -226,7 +307,7 @@ function MapCard({ map, onRequestDelete }: MapCardProps): React.JSX.Element {
         <p className="line-clamp-2 text-sm text-canvas-muted">{map.description}</p>
       )}
 
-      <p className={cn('mt-auto pt-2 text-xs text-canvas-muted')}>
+      <p className="mt-auto pt-2 text-xs text-canvas-muted">
         {map.nodeCount} {map.nodeCount === 1 ? 'node' : 'nodes'} · edited{' '}
         {formatRelativeTime(map.updatedAt)}
       </p>
