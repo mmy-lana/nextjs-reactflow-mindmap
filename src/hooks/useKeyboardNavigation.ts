@@ -181,8 +181,6 @@ export function matchesShortcut(event: KeyboardEvent, combo: string): boolean {
 }
 
 export interface UseKeyboardNavigationOptions {
-  /** Starts editing the label of a node; supplied by the editor. */
-  onEditLabel?: (nodeId: string) => void;
   /** Opens the shortcuts dialog. */
   onShowShortcuts?: () => void;
   /** Disabled while a document is still hydrating. */
@@ -192,7 +190,6 @@ export interface UseKeyboardNavigationOptions {
 /** Everything the key handler needs, refreshed on every render. */
 interface KeyboardContext {
   enabled: boolean;
-  onEditLabel: ((nodeId: string) => void) | undefined;
   onShowShortcuts: (() => void) | undefined;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
@@ -204,13 +201,14 @@ interface KeyboardContext {
   deleteSubtree: MindMapStore['deleteSubtree'];
   toggleSubtreeCollapse: MindMapStore['toggleSubtreeCollapse'];
   setSelectedNodeId: MindMapStore['setSelectedNodeId'];
+  setEditingNodeId: MindMapStore['setEditingNodeId'];
   setActiveDrawer: MindMapStore['setActiveDrawer'];
   undo: MindMapStore['undo'];
   redo: MindMapStore['redo'];
 }
 
 export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}): void {
-  const { onEditLabel, onShowShortcuts, enabled = true } = options;
+  const { onShowShortcuts, enabled = true } = options;
   const flow = useReactFlow<CanvasNode>();
 
   const nodes = useMindMapStore((state) => state.nodes);
@@ -222,6 +220,7 @@ export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}
   const deleteSubtree = useMindMapStore((state) => state.deleteSubtree);
   const toggleSubtreeCollapse = useMindMapStore((state) => state.toggleSubtreeCollapse);
   const setSelectedNodeId = useMindMapStore((state) => state.setSelectedNodeId);
+  const setEditingNodeId = useMindMapStore((state) => state.setEditingNodeId);
   const setActiveDrawer = useMindMapStore((state) => state.setActiveDrawer);
   const undo = useMindMapStore((state) => state.undo);
   const redo = useMindMapStore((state) => state.redo);
@@ -231,7 +230,6 @@ export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}
   // never drop a keypress between re-binds.
   const context = useRef<KeyboardContext>({
     enabled: false,
-    onEditLabel: undefined,
     onShowShortcuts: undefined,
     nodes: [],
     edges: [],
@@ -243,6 +241,7 @@ export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}
     deleteSubtree: () => undefined,
     toggleSubtreeCollapse: () => undefined,
     setSelectedNodeId: () => undefined,
+    setEditingNodeId: () => undefined,
     setActiveDrawer: () => undefined,
     undo: async () => undefined,
     redo: async () => undefined,
@@ -250,7 +249,6 @@ export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}
 
   context.current = {
     enabled,
-    onEditLabel,
     onShowShortcuts,
     nodes,
     edges,
@@ -264,6 +262,7 @@ export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}
     deleteSubtree,
     toggleSubtreeCollapse,
     setSelectedNodeId,
+    setEditingNodeId,
     setActiveDrawer,
     undo,
     redo,
@@ -366,7 +365,7 @@ export function useKeyboardNavigation(options: UseKeyboardNavigationOptions = {}
     }
     if (event.key === 'F2') {
       event.preventDefault();
-      ctx.onEditLabel?.(selected!);
+      ctx.setEditingNodeId(selected!);
       return;
     }
     if (event.key === 'ArrowUp') {

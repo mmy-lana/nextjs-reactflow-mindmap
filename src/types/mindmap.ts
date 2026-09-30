@@ -68,6 +68,13 @@ export interface MindMapEdgeData extends Record<string, unknown> {
   strokeWidth?: number;
   dashed?: boolean;
   label?: string;
+  /**
+   * Generation index of the child the edge points at, `1` or deeper.
+   *
+   * Kept on the edge so the renderer can taper the stroke without having to
+   * look the node up again for every frame of a pan or zoom.
+   */
+  depth?: NodeDepth;
 }
 
 /** Data contract of every node rendered on the canvas. */

@@ -450,6 +450,7 @@ function wireEdges(
       data: {
         ...edge.data,
         branchColor: edge.data?.branchColor ?? resolveBranchColor(depth),
+        depth,
       },
     };
   });

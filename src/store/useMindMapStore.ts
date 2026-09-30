@@ -159,6 +159,8 @@ export interface MindMapState {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   selectedNodeId: string | null;
+  /** Node whose label is being edited inline, if any. */
+  editingNodeId: string | null;
   history: HistoryEntry[];
   historyIndex: number;
   isLayoutRunning: boolean;
@@ -200,6 +202,7 @@ export interface MindMapActions {
   redo: () => Promise<void>;
   setActiveDrawer: (drawer: ActiveDrawerType) => void;
   setSelectedNodeId: (nodeId: string | null) => void;
+  setEditingNodeId: (nodeId: string | null) => void;
   canUndo: () => boolean;
   canRedo: () => boolean;
 }
@@ -212,6 +215,7 @@ const INITIAL_STATE: MindMapState = {
   nodes: [],
   edges: [],
   selectedNodeId: null,
+  editingNodeId: null,
   history: [],
   historyIndex: -1,
   isLayoutRunning: false,
@@ -891,7 +895,17 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
     },
 
     setSelectedNodeId: (nodeId) => {
-      set({ selectedNodeId: nodeId });
+      const { editingNodeId } = get();
+      // Selecting a different node abandons the open editor: two inline inputs
+      // on one canvas would fight over the keyboard.
+      set({
+        selectedNodeId: nodeId,
+        editingNodeId: editingNodeId !== null && editingNodeId !== nodeId ? null : editingNodeId,
+      });
+    },
+
+    setEditingNodeId: (nodeId) => {
+      set({ editingNodeId: nodeId, selectedNodeId: nodeId ?? get().selectedNodeId });
     },
   };
 });
@@ -914,6 +928,7 @@ function hydrate(
     history: [],
     historyIndex: -1,
     selectedNodeId: null,
+    editingNodeId: null,
     activeDrawer: null,
     isLayoutRunning: false,
     loadError: null,
