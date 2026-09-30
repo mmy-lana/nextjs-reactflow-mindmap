@@ -107,7 +107,7 @@ export function MindMapCanvas(): React.JSX.Element {
   );
 
   return (
-    <div className="relative size-full bg-canvas-bg">
+    <div className="relative size-full bg-canvas-bg" data-canvas-root>
       <ReactFlow<CanvasNode, CanvasEdge>
         nodes={nodes}
         edges={edges}

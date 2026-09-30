@@ -191,12 +191,30 @@ export interface MindMapActions {
   setNodeDirection: (id: string, direction: NodeDirection) => void;
   deleteSubtree: (nodeId: string) => void;
   toggleSubtreeCollapse: (nodeId: string) => void;
+  /**
+   * Collapses or expands every branch at once, as a single undo step.
+   *
+   * Leaves are left untouched: `isCollapsed` on a leaf would be a lie the
+   * inspector would have to special case.
+   */
+  setAllSubtreesCollapsed: (collapsed: boolean) => void;
   applyLayout: (options?: Partial<LayoutOptions>) => void;
   updateViewport: (viewport: ViewportState) => void;
   renameDocument: (title: string) => void;
   updateDocumentDescription: (description: string) => void;
-  /** Replaces the whole canvas, used by JSON import. */
-  replaceCanvas: (nodes: CanvasNode[], edges: CanvasEdge[], description: string) => void;
+  /**
+   * Replaces the whole canvas, used by JSON import.
+   *
+   * The title is optional so the importer can adopt the file's name or keep the
+   * current one. Either way it lands in the same history step as the nodes: an
+   * import that half applied is worse than one that is easy to undo.
+   */
+  replaceCanvas: (
+    nodes: CanvasNode[],
+    edges: CanvasEdge[],
+    description: string,
+    title?: string,
+  ) => void;
   clearDocument: () => void;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
@@ -768,6 +786,38 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       persist(isCollapsed ? 'Collapse Branch' : 'Expand Branch');
     },
 
+    setAllSubtreesCollapsed: (collapsed) => {
+      const { nodes, edges } = get();
+      const branches = new Set<string>();
+      for (const edge of edges) {
+        if (edge.source !== edge.target) {
+          branches.add(edge.source);
+        }
+      }
+
+      const targets = new Set(
+        nodes
+          .filter(
+            (node) => branches.has(node.id) && (node.data.isCollapsed === true) !== collapsed,
+          )
+          .map((node) => node.id),
+      );
+      if (targets.size === 0) {
+        return;
+      }
+
+      commit(
+        nodes.map((node) =>
+          targets.has(node.id)
+            ? { ...node, data: { ...node.data, isCollapsed: collapsed, updatedAt: Date.now() } }
+            : node,
+        ),
+        edges,
+        true,
+      );
+      persist(collapsed ? 'Collapse All Branches' : 'Expand All Branches');
+    },
+
     /* --------------------------------------------------------------- layout */
 
     applyLayout: (options) => {
@@ -829,7 +879,7 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       get().scheduleSave();
     },
 
-    replaceCanvas: (nextNodes, nextEdges, description) => {
+    replaceCanvas: (nextNodes, nextEdges, description, title) => {
       const { meta } = get();
       if (!meta) {
         return;
@@ -842,8 +892,13 @@ export const useMindMapStore = create<MindMapStore>()((set, get) => {
       });
       commit(expanded, nextEdges, true);
       set({
-        meta: { ...meta, description },
+        meta: {
+          ...meta,
+          description,
+          ...(title === undefined ? {} : { title: title.trim().slice(0, 120) || meta.title }),
+        },
         selectedNodeId: null,
+        editingNodeId: null,
       });
       persist('Import Map');
     },
